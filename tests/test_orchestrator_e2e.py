@@ -4,7 +4,6 @@ Exercises: memory graph -> planner -> symbolic gate -> simulator -> latent
 ensemble -> critic -> arbiter -> local sandbox -> DB logging.
 """
 
-import shutil
 import uuid
 from pathlib import Path
 

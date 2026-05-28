@@ -18,7 +18,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from nse.config import SETTINGS
+from pathlib import Path
+
+from nse.config import ROOT, SETTINGS
 from nse.orchestrator.schemas import LatentPrediction, PlannerBranch
 
 try:
@@ -63,7 +65,14 @@ if _TORCH:
                 return global_mean_pool(x, batch)
             x = self.lin1(x).relu()
             x = self.lin2(x).relu()
-            return x.mean(dim=0, keepdim=True)
+            # Batch-aware mean pool (one row per graph). A naive global mean
+            # would collapse the whole batch to a single row and corrupt
+            # batched training when torch_geometric is absent.
+            num_graphs = int(batch.max().item()) + 1 if batch.numel() else 1
+            pooled = torch.zeros(num_graphs, x.size(1), device=x.device)
+            pooled.index_add_(0, batch, x)
+            counts = torch.bincount(batch, minlength=num_graphs).clamp(min=1)
+            return pooled / counts.unsqueeze(1).to(x.dtype)
 
     class LatentModel(nn.Module):
         def __init__(
@@ -131,13 +140,24 @@ class LatentEnsemble:
 
     # ── inference ──────────────────────────────────────────────────────
     def predict(self, branch: PlannerBranch) -> LatentPrediction:
+        """Score a planner branch. Delegates to :meth:`predict_from_features`."""
         feats = self.patch_features(branch)
+        return self.predict_from_features(feats, branch_id=branch.branch_id)
 
+    def predict_from_features(
+        self, feats: list[float], branch_id: str = ""
+    ) -> LatentPrediction:
+        """Score a raw 6-dim patch-feature vector.
+
+        Decoupled from ``PlannerBranch`` so the eval harness and training loop
+        can score serialised feature vectors directly. ``feats[4]`` is the
+        branch's ``expected_complexity``.
+        """
         if _TORCH and self.model is not None:
             with torch.no_grad():  # type: ignore[union-attr]
                 # Minimal single-node graph: feature vector from complexity.
                 g_x = torch.zeros((1, 32))
-                g_x[0, 0] = branch.expected_complexity
+                g_x[0, 0] = feats[4]
                 edge_index = torch.empty((2, 0), dtype=torch.long)
                 batch = torch.zeros(1, dtype=torch.long)
                 patch_emb = torch.tensor([feats], dtype=torch.float32)
@@ -149,18 +169,18 @@ class LatentEnsemble:
             mean = p_t_latent
             u = sum((p - mean) ** 2 for p in p_ts) / len(p_ts)
             return LatentPrediction(
-                branch_id=branch.branch_id,
+                branch_id=branch_id,
                 p_t_latent=p_t_latent,
                 r_long=r_long,
                 u=u,
                 per_head_p_t=p_ts,
             )
 
-        return self._heuristic_predict(branch, feats)
+        return self._heuristic_predict(feats, branch_id)
 
-    def _heuristic_predict(self, branch: PlannerBranch, feats: list[float]) -> LatentPrediction:
+    def _heuristic_predict(self, feats: list[float], branch_id: str = "") -> LatentPrediction:
         """Deterministic, bounded fallback. Encodes 'simpler == safer'."""
-        complexity = branch.expected_complexity
+        complexity = feats[4]
         center = self._h.base - self._h.complexity_penalty * complexity
         center = min(0.95, max(0.05, center))
         # Synthesize M slightly perturbed heads so u is non-degenerate and
@@ -174,7 +194,7 @@ class LatentEnsemble:
         u = sum((p - mean) ** 2 for p in per_head) / self.M
         r_long = min(1.0, 0.2 + 0.6 * complexity)
         return LatentPrediction(
-            branch_id=branch.branch_id,
+            branch_id=branch_id,
             p_t_latent=mean,
             r_long=r_long,
             u=u,
@@ -184,3 +204,36 @@ class LatentEnsemble:
 
 def is_neural_available() -> bool:
     return _TORCH
+
+
+# ───────────────────────────── persistence ─────────────────────────────
+
+WEIGHTS_DIR = ROOT / "nse" / "models" / "weights"
+DEFAULT_WEIGHTS_PATH = WEIGHTS_DIR / "latent.pt"
+
+
+def save_model(model: "LatentModel", path: Optional[Path] = None) -> Path:  # type: ignore[name-defined]
+    """Persist a trained ensemble's weights. Returns the path written."""
+    if not _TORCH:
+        raise RuntimeError("torch not installed")
+    path = Path(path) if path is not None else DEFAULT_WEIGHTS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), path)  # type: ignore[union-attr]
+    return path
+
+
+def load_ensemble(path: Optional[Path] = None, strict: bool = True) -> "LatentEnsemble":
+    """Load trained weights into a :class:`LatentEnsemble`.
+
+    Falls back to the heuristic ensemble (``model=None``) when torch is missing
+    or the weights file is absent — the orchestrator keeps running either way.
+    """
+    path = Path(path) if path is not None else DEFAULT_WEIGHTS_PATH
+    if not _TORCH or not path.exists():
+        if strict and _TORCH and not path.exists():
+            raise FileNotFoundError(f"no latent weights at {path}")
+        return LatentEnsemble()
+    model = LatentModel()  # type: ignore[call-arg]
+    model.load_state_dict(torch.load(path, map_location="cpu"))  # type: ignore[union-attr]
+    model.eval()
+    return LatentEnsemble(model=model)

@@ -25,7 +25,7 @@ from nse.config import SETTINGS
 from nse.db.db_client import DBClient
 from nse.memory_graph.context import get_prompt_context
 from nse.memory_graph.graph_db import MemoryGraph
-from nse.models.latent_model import LatentEnsemble
+from nse.models.latent_model import LatentEnsemble, load_ensemble
 from nse.orchestrator import arbiter
 from nse.orchestrator.executor import run_sandbox, to_outcome
 from nse.orchestrator.patcher import (
@@ -74,7 +74,9 @@ class Orchestrator:
         self.planner = planner or PlannerClient()
         self.simulator = simulator or SimulatorClient()
         self.critic = critic or CriticClient()
-        self.ensemble = ensemble or LatentEnsemble()
+        # Auto-load trained latent weights when present; the heuristic fallback
+        # keeps the pipeline running before any training has happened.
+        self.ensemble = ensemble or load_ensemble(strict=False)
         self.force_local_sandbox = force_local_sandbox
 
     # ── per-branch scoring ─────────────────────────────────────────────

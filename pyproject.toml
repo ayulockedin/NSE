@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nse"
+version = "0.1.0"
+description = "Neural Shadow Executor — anticipatory, safety-focused patch-selection engine"
+requires-python = ">=3.10"
+
+[tool.setuptools]
+packages = [
+    "nse",
+    "nse.orchestrator",
+    "nse.memory_graph",
+    "nse.agents",
+    "nse.models",
+    "nse.db",
+    "nse.tools",
+    "nse.scripts",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+ignore_missing_imports = true

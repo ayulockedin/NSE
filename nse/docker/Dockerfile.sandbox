@@ -1,0 +1,15 @@
+# Sandbox base image for NSE test execution.
+#
+# The sandbox runs with --network none, so dependencies CANNOT be installed at
+# run time — they must be baked in here. This image carries pytest plus the
+# common test stack; extend it (or build a per-repo image) for projects with
+# heavier dependencies.
+#
+# Build:  docker build -f nse/docker/Dockerfile.sandbox -t nse-sandbox:latest .
+FROM python:3.11-slim
+
+RUN pip install --no-cache-dir pytest && \
+    useradd -u 1000 -m sandbox
+
+USER 1000:1000
+WORKDIR /workspace/repo

@@ -83,7 +83,7 @@ Or run the orchestrator API: `.\nse\scripts\run_dev.ps1` then
 .\venv\Scripts\python.exe -m pytest -q
 ```
 
-## Security (non-negotiable)
+## Security
 
 Sandbox runs are Docker-isolated: `--network none`, all caps dropped,
 `no-new-privileges`, non-root, read-only base FS, CPU/memory limits. Branches
@@ -110,7 +110,7 @@ image is absent.
 
 ## Status / not yet built
 
-Day-1 foundation is complete and verified end-to-end. Still to come (later
+Phase - 1 foundation is complete and verified end-to-end. Still to come (later
 blueprint phases): trained latent GNN + synthetic mutation generator, full
 calibration retrain loop, audit reservoir background replay, and the distilled
 fast-mode policy. The latent model currently runs a deterministic heuristic

@@ -10,7 +10,6 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 # tree-sitter is the blueprint's primary parser; we degrade to stdlib ast for
 # Python so the extractor works even before grammars are built.

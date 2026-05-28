@@ -7,10 +7,9 @@ move to Postgres without touching call sites.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from nse.config import DB_PATH, SCHEMA_PATH
 from nse.orchestrator.schemas import (

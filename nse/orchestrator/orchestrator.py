@@ -492,6 +492,20 @@ class Orchestrator:
                 "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"
             ),
         )
+        self._prune_old_snapshots(SETTINGS.hp.max_audit_snapshots)
+
+    def _prune_old_snapshots(self, max_keep: int) -> None:
+        """Bound retained snapshots (Phase 13): drop the oldest task snapshots
+        beyond ``max_keep`` so disk doesn't grow unboundedly. ``max_keep`` is set
+        well above the audit cadence, so snapshots awaiting audit always survive."""
+        if max_keep <= 0 or not self.audit_dir.exists():
+            return
+        dirs = [d for d in self.audit_dir.iterdir() if d.is_dir()]
+        if len(dirs) <= max_keep:
+            return
+        dirs.sort(key=lambda d: d.stat().st_mtime)
+        for d in dirs[: len(dirs) - max_keep]:
+            shutil.rmtree(d, ignore_errors=True)
 
     def _finalize(self, report: TaskReport, start: float) -> TaskReport:
         report.wall_clock_s = round(time.time() - start, 3)

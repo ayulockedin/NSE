@@ -51,6 +51,10 @@ class Hyperparams:
     audit_every_n_tasks: int = 100
     calibration_retrain_every: int = 50
     false_negative_alarm: float = 0.02
+    # Cap on retained pristine task snapshots (Phase 13): the audit loop only needs
+    # recent ones, so the oldest beyond this are pruned to bound disk. Kept well
+    # above audit_every_n_tasks so unaudited snapshots always survive.
+    max_audit_snapshots: int = 500
     # Conformal EXECUTE gate (Phase 7.2): EXECUTE only above a threshold that
     # holds the false-execute rate <= false_execute_alpha with confidence
     # 1 - conformal_delta on the calibration set.

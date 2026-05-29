@@ -38,6 +38,7 @@ from nse.orchestrator import arbiter
 from nse.orchestrator.audit import reexecute_pruned
 from nse.orchestrator.cost import CostLedger, CostModel, rank_by_acquisition
 from nse.orchestrator.executor import run_sandbox, to_outcome
+from nse.orchestrator.invariants import assert_safe
 from nse.orchestrator.patcher import (
     PatchApplyError,
     PatchSafetyError,
@@ -346,6 +347,8 @@ class Orchestrator:
                     # property check; a new crash is unambiguous breakage -> prune.
                     if pred.routing == Routing.INCREMENTAL_SANDBOX and ctx and ctx.edited_fns:
                         self._apply_oracle_evidence(pred, b, snapshot, ctx.edited_fns[0])
+                    # Phase 12.3: enforce the safety invariants on the final decision.
+                    assert_safe(pred, coverage_u=ctx.coverage_u if ctx else 0.0)
             tokens = sum(
                 getattr(a, "tokens_used", 0) for a in (self.simulator, self.critic)
             )

@@ -130,9 +130,15 @@ class LLMConfig:
         default_factory=lambda: float(os.environ.get("NSE_LLM_TIMEOUT_S", "60"))
     )
     max_retries: int = 2
-    planner_temperature: float = 0.8
+    # Lowered from 0.8: a 7B coding model needs low temperature to reliably emit
+    # COMPLETE, schema-valid file rewrites; at high temp it returns prose-y
+    # strategies with no applicable patch (the cascade then prunes everything).
+    planner_temperature: float = 0.4
     simulator_temperature: float = 0.2
-    critic_temperature: float = 1.0
+    # Lowered from 1.0: at high temp the 7B red-team hallucinates risk (e.g.
+    # r_critic=0.8 for a docstring), and lambda1=1.0 then tanks an otherwise-safe
+    # score. Low temp + the calibration guidance in CRITIC_SYSTEM keep r_critic honest.
+    critic_temperature: float = 0.3
     max_output_tokens: int = 1024
 
 

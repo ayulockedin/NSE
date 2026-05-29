@@ -10,6 +10,7 @@ Strict per-task budgets are enforced throughout (section 8.2).
 
 from __future__ import annotations
 
+import difflib
 import shutil
 import tempfile
 import time
@@ -288,6 +289,12 @@ class Orchestrator:
             report.notes.append(f"planner failed: {exc}")
             return self._finalize(report, start)
         report.branches_generated = len(branches)
+        # A planner that returns only a full-file rewrite (the preferred, more
+        # reliable form for small models) has no diff — derive one from the
+        # pristine repo so the latent featurizer sees the real change, not a no-op.
+        for b in branches:
+            if not b.patch_preview and b.full_file_rewrites:
+                b.patch_preview = self._diff_from_rewrites(repo_path, b.full_file_rewrites)
         for b in branches:
             self.db.insert_branch(task_id, b)
 
@@ -476,6 +483,26 @@ class Orchestrator:
             )
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+    @staticmethod
+    def _diff_from_rewrites(repo_path: Path | str, rewrites: dict[str, str]) -> str:
+        """Unified diff of full-file rewrites vs the current repo, so a rewrite-only
+        branch still yields a real ``patch_preview`` for feature extraction + logs."""
+        parts: list[str] = []
+        for rel, new_text in rewrites.items():
+            fp = Path(repo_path) / rel
+            old = fp.read_text(encoding="utf-8") if fp.exists() else ""
+            parts.append(
+                "".join(
+                    difflib.unified_diff(
+                        old.splitlines(keepends=True),
+                        new_text.splitlines(keepends=True),
+                        fromfile=f"a/{rel}",
+                        tofile=f"b/{rel}",
+                    )
+                )
+            )
+        return "".join(parts)
 
     def _retain_snapshot(self, task_id: str, repo_path: Path) -> None:
         """Copy the pristine repo aside so the audit loop can replay pruned

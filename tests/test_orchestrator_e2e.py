@@ -215,3 +215,56 @@ def test_cascade_screens_hopeless_branch_before_llm(db: DBClient):
     assert bad.routing == Routing.PRUNE
     assert bad.prune_reason == PruneReason.LOW_SCORE
     assert bad.p_t_sim == 0.0                      # never judged -> no fabricated sim signal
+
+
+class _ConfidentEnsemble(LatentEnsemble):
+    def predict(self, branch, node_features=None, edge_index=None):
+        return LatentPrediction(
+            branch_id=branch.branch_id, p_t_latent=0.9, r_long=0.05, u=0.0,
+            per_head_p_t=[0.9],
+        )
+
+
+class RewriteOnlyPlanner:
+    """Returns a branch with ONLY full_file_rewrites (no diff) — the form small
+    models reliably emit. The orchestrator must synthesize a diff for scoring."""
+
+    def __init__(self) -> None:
+        self.bid = str(uuid.uuid4())
+
+    def plan(self, task, context):
+        newsrc = (
+            '"""Tiny module under test for the NSE end-to-end smoke test."""\n\n\n'
+            "def add(a, b):\n    return a + b\n\n\n"
+            'def sub(a, b):\n    """Subtract b from a."""\n    return a - b\n'
+        )
+        return [PlannerBranch(
+            branch_id=self.bid, strategy="add docstring to sub", edited_files=["calc.py"],
+            full_file_rewrites={"calc.py": newsrc}, expected_complexity=0.1,
+            planner_confidence=0.9,
+        )]
+
+
+def test_diff_from_rewrites_synthesizes_unified_diff(tmp_path):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    (repo / "m.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    diff = Orchestrator._diff_from_rewrites(repo, {"m.py": "def f():\n    return 2\n"})
+    assert "-    return 1" in diff and "+    return 2" in diff
+    assert "+x = 1" in Orchestrator._diff_from_rewrites(repo, {"new.py": "x = 1\n"})
+
+
+def test_rewrite_only_planner_is_scored_and_executes(db: DBClient):
+    import json
+
+    orch = Orchestrator(
+        db=db, planner=RewriteOnlyPlanner(), simulator=FakeSimulator(), critic=FakeCritic(),
+        ensemble=_ConfidentEnsemble(), force_local_sandbox=True,
+    )
+    report = orch.run_task("add docstring", TOY, ["calc.py"])
+    # A rewrite-only branch is given a synthesized diff -> non-degenerate features
+    # -> scored -> executed -> verified.
+    assert report.best_branch_id is not None
+    assert report.outcome_tests_passed == 1
+    pj = json.loads(db.get_branch(report.best_branch_id)["planner_json"])
+    assert pj["patch_preview"] and "+" in pj["patch_preview"]   # diff was synthesized

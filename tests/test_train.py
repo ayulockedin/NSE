@@ -95,7 +95,8 @@ def test_grouped_folds_split_by_file():
 
 def test_cross_validation_beats_heuristic_on_learnable_signal():
     data = _synthetic(120)
-    base, trained = cross_validate(data, k=4, epochs=120, seed=5)
+    # Deterministic (fixed seed); 60 epochs already converges with wide margin.
+    base, trained = cross_validate(data, k=4, epochs=60, seed=5)
     # Pooled out-of-fold: the trained model must generalize past the heuristic
     # on data it never trained on, fold by fold.
     assert trained.auc is not None and base.auc is not None

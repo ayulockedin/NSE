@@ -1,7 +1,10 @@
 """Tests for the Phase-6 calibration + audit control loop."""
 
+import pytest
+
 from nse.db.db_client import DBClient
 from nse.models.calibrate import (
+    _SKLEARN,
     Recalibrator,
     compute_ece,
     fit_isotonic_recalibrator,
@@ -13,7 +16,11 @@ from nse.orchestrator.schemas import (
     Outcome,
     PlannerBranch,
     PruneReason,
+    Routing,
 )
+
+# Isotonic recalibration needs scikit-learn; skip those cases when it's absent.
+requires_sklearn = pytest.mark.skipif(not _SKLEARN, reason="scikit-learn not installed")
 
 
 # ──────────────────────────── fixtures / seeding ────────────────────────
@@ -74,6 +81,7 @@ def test_recalibrator_json_roundtrip():
     assert abs(r2(0.25) - 0.125) < 1e-9  # linear interpolation between knots
 
 
+@requires_sklearn
 def test_isotonic_recalibrator_reduces_ece():
     pairs = _miscalibrated()
     probs = [p for p, _ in pairs]
@@ -88,6 +96,7 @@ def test_isotonic_recalibrator_reduces_ece():
 # ──────────────────────────── run_calibration ───────────────────────────
 
 
+@requires_sklearn
 def test_run_calibration_recalibrates_when_miscalibrated(tmp_path):
     db = _db(tmp_path)
     _seed_pairs(db, _miscalibrated())
@@ -120,6 +129,7 @@ def test_run_calibration_skips_on_insufficient_data(tmp_path):
     assert result.recalibrated is False
 
 
+@requires_sklearn
 def test_load_recalibrator_roundtrips_through_disk(tmp_path):
     db = _db(tmp_path)
     _seed_pairs(db, _miscalibrated())
@@ -163,11 +173,13 @@ def test_arbiter_recalibrator_changes_decision_but_keeps_raw_p_t():
         branch_id="b", p_c=1, p_t=0.8, u=0.0, c_planner=1.0, r_critic=0.0, r_long=0.0
     )
     base = arbiter.decide(BranchPrediction(**pred.model_dump()))
-    # A recalibrator that collapses p_t well below tau_prune must lower the score
-    # and flip the routing, while the logged pred.p_t stays the raw 0.8.
+    # Collapsing p_t lowers the score (stable invariant) while the logged
+    # pred.p_t stays the raw 0.8. The exact routing depends on hyperparameters,
+    # so we only assert it moves out of EXECUTE into a conservative decision.
     recal_pred = arbiter.decide(
         BranchPrediction(**pred.model_dump()), recalibrator=lambda p: 0.05
     )
     assert recal_pred.p_t == 0.8
     assert recal_pred.score < base.score
-    assert recal_pred.routing != base.routing
+    assert base.routing == Routing.EXECUTE
+    assert recal_pred.routing != Routing.EXECUTE

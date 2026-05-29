@@ -117,7 +117,7 @@ def run_audit(
         else sampling_percent
     )
     total = db.count_pruned_unsampled()
-    if total == 0:
+    if total == 0 or pct <= 0:  # pct<=0 disables sampling entirely
         return []
     limit = max(1, round(pct * total))
     sampled = db.sample_pruned_for_audit(limit)

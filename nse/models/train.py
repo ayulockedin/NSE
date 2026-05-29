@@ -231,22 +231,24 @@ def cross_validate(
     base_oof: list[float] = []
     trained_oof: list[float] = []
     labels_oof: list[int] = []
+    base_ensemble = LatentEnsemble()  # stateless heuristic; reuse across folds
 
     for f, test_idx in enumerate(folds):
+        test_idx_set = set(test_idx)
         test_set = [examples[i] for i in test_idx]
-        train_set = [examples[i] for i in range(len(examples)) if i not in set(test_idx)]
+        train_set = [e for i, e in enumerate(examples) if i not in test_idx_set]
         if not test_set or not train_set:
             continue
-        model = train(train_set, epochs=epochs, lr=lr, seed=seed)
-        base = evaluate_ensemble(test_set, LatentEnsemble())
-        trained = evaluate_ensemble(test_set, LatentEnsemble(model=model))
+        trained_ensemble = LatentEnsemble(model=train(train_set, epochs=epochs, lr=lr, seed=seed))
+        base = evaluate_ensemble(test_set, base_ensemble)
+        trained = evaluate_ensemble(test_set, trained_ensemble)
         print(
             f"  fold {f + 1}/{len(folds)} (n={len(test_set):3}): "
             f"AUC {fmt(base.auc)}->{fmt(trained.auc)}  "
             f"Brier {base.brier:.3f}->{trained.brier:.3f}"
         )
-        base_oof.extend(predict_probs_for(test_set, LatentEnsemble()))
-        trained_oof.extend(predict_probs_for(test_set, LatentEnsemble(model=model)))
+        base_oof.extend(predict_probs_for(test_set, base_ensemble))
+        trained_oof.extend(predict_probs_for(test_set, trained_ensemble))
         labels_oof.extend(e.label for e in test_set)
 
     return report_from_probs(base_oof, labels_oof), report_from_probs(

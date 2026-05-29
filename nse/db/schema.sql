@@ -50,6 +50,17 @@ CREATE TABLE IF NOT EXISTS calibrations (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Outcomes of re-running sampled pruned branches (false-negative hunting).
+CREATE TABLE IF NOT EXISTS audit_results (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    pruned_id      INTEGER REFERENCES pruned_branches(id),
+    branch_id      TEXT,
+    tests_passed   INTEGER,    -- 0/1 when re-run; NULL if not re-executable
+    false_negative INTEGER,    -- 1 if pruned for low score but actually passed
+    runtime        REAL,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_predictions_branch ON predictions(branch_id);
 CREATE INDEX IF NOT EXISTS idx_outcomes_branch    ON outcomes(branch_id);
 CREATE INDEX IF NOT EXISTS idx_pruned_sampled     ON pruned_branches(sampled_for_audit);

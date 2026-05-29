@@ -25,10 +25,11 @@ from nse.config import SETTINGS
 from nse.db.db_client import DBClient
 from nse.memory_graph.context import get_prompt_context
 from nse.memory_graph.graph_db import MemoryGraph
-from nse.models.calibration_loop import load_recalibrator, run_audit, run_calibration
+from nse.models.calibration_loop import load_recalibrator, run_calibration
 from nse.models.cpg_features import build_cpg_features, changed_function_names
 from nse.models.latent_model import LatentEnsemble, load_ensemble
 from nse.orchestrator import arbiter
+from nse.orchestrator.audit import reexecute_pruned
 from nse.orchestrator.executor import run_sandbox, to_outcome
 from nse.orchestrator.patcher import (
     PatchApplyError,
@@ -83,6 +84,9 @@ class Orchestrator:
         # recalibration); applied to aggregated p_t in the arbiter.
         self.recalibrator = load_recalibrator()
         self.force_local_sandbox = force_local_sandbox
+        # Pristine per-task snapshots retained here so the audit loop can replay
+        # pruned branches. Kept next to the DB (git-ignored) -> tmp DB in tests.
+        self.audit_dir = self.db.db_path.parent / "audit_snapshots"
 
     # ── per-branch scoring ─────────────────────────────────────────────
     def _score_branch(
@@ -184,6 +188,10 @@ class Orchestrator:
         for b in branches:
             self.db.insert_branch(task_id, b)
 
+        # Retain a pristine snapshot so the audit loop can later replay any
+        # branch this task prunes.
+        self._retain_snapshot(task_id, repo_path)
+
         # 3. Simulator + Critic (batched per task; share the prefix).
         sim = self.simulator.simulate(task, context, branches)
         crit = self.critic.critique(task, context, branches)
@@ -242,6 +250,22 @@ class Orchestrator:
 
         return self._finalize(report, start)
 
+    def _retain_snapshot(self, task_id: str, repo_path: Path) -> None:
+        """Copy the pristine repo aside so the audit loop can replay pruned
+        branches against the exact state they were scored on. Heavy/regenerable
+        dirs are skipped; existing snapshots are left as-is."""
+        dest = self.audit_dir / task_id / "repo"
+        if dest.exists():
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            repo_path,
+            dest,
+            ignore=shutil.ignore_patterns(
+                "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"
+            ),
+        )
+
     def _finalize(self, report: TaskReport, start: float) -> TaskReport:
         report.wall_clock_s = round(time.time() - start, 3)
         self._maybe_run_controls(report)
@@ -260,6 +284,15 @@ class Orchestrator:
             if result.recalibrated:
                 self.recalibrator = load_recalibrator()
         if hp.audit_every_n_tasks and n_tasks % hp.audit_every_n_tasks == 0:
-            sampled = run_audit(self.db)
-            if sampled:
-                report.notes.append(f"audit: sampled {len(sampled)} pruned branch(es)")
+            total = self.db.count_pruned_unsampled()
+            if total and hp.audit_sampling_percent > 0:
+                limit = max(1, round(hp.audit_sampling_percent * total))
+                rows = self.db.sample_pruned_for_audit(limit)
+                summary = reexecute_pruned(
+                    self.db, self.audit_dir, rows,
+                    force_local=self.force_local_sandbox,
+                )
+                report.notes.append(
+                    f"audit: re-ran {summary.reexecuted}/{summary.sampled} pruned, "
+                    f"{summary.false_negatives} false-negative(s)"
+                )

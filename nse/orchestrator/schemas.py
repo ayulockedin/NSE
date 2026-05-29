@@ -99,7 +99,8 @@ class LatentPrediction(BaseModel):
     branch_id: str
     p_t_latent: float = Field(ge=0.0, le=1.0)
     r_long: float = Field(ge=0.0, le=1.0)
-    u: float = Field(ge=0.0)                      # raw ensemble variance
+    u: float = Field(ge=0.0)                      # epistemic: variance across heads
+    u_aleatoric: float = Field(default=0.0, ge=0.0)  # irreducible: mean head p(1-p)
     per_head_p_t: list[float] = Field(default_factory=list)
 
 
@@ -111,7 +112,8 @@ class BranchPrediction(BaseModel):
     p_t_sim: float = Field(default=0.0, ge=0.0, le=1.0)
     p_t_latent: float = Field(default=0.0, ge=0.0, le=1.0)
     p_t: float = Field(default=0.0, ge=0.0, le=1.0)
-    u: float = Field(default=0.0, ge=0.0)
+    u: float = Field(default=0.0, ge=0.0)        # epistemic uncertainty
+    u_aleatoric: float = Field(default=0.0, ge=0.0)  # irreducible uncertainty
     r_critic: float = Field(default=0.0, ge=0.0, le=1.0)
     r_long: float = Field(default=0.0, ge=0.0, le=1.0)
     c_planner: float = Field(default=0.0, ge=0.0, le=1.0)

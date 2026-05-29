@@ -186,6 +186,7 @@ class Orchestrator:
             p_t_latent=latent.p_t_latent,
             p_t=arbiter.aggregate_p_t(latent.p_t_latent, SCREEN_OPTIMISTIC_SIM),
             u=latent.u,
+            u_aleatoric=latent.u_aleatoric,
             r_critic=0.0,
             r_long=latent.r_long,
             c_planner=branch.planner_confidence,
@@ -339,6 +340,7 @@ class Orchestrator:
                         recalibrator=self.recalibrator,
                         coverage_u=ctx.coverage_u if ctx else 0.0,
                         conformal_threshold=self.conformal_threshold,
+                        aleatoric_max=SETTINGS.hp.aleatoric_max,
                     )
                     # Phase 7.3 oracle: a branch sent to gather evidence gets a
                     # property check; a new crash is unambiguous breakage -> prune.
@@ -416,9 +418,13 @@ class Orchestrator:
                     report.cost_units = round(ledger.total, 4)
                     return self._finalize(report, start)
 
+            reviews = sum(
+                1 for (_, p, _) in screened if p.routing == Routing.HUMAN_REVIEW
+            )
             report.notes.append(
                 f"cascade: screened {len(branches)} -> judged {len(survivors)} "
                 f"(saved {saved} LLM); no EXECUTE, {len(incrementals)} uncertain, "
+                f"{reviews} escalated to human (aleatoric), "
                 f"{sandbox_runs} evidence run(s), none passed"
             )
             report.cost_units = round(ledger.total, 4)

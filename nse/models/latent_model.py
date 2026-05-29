@@ -194,12 +194,16 @@ class LatentEnsemble:
             p_t_latent = sum(p_ts) / len(p_ts)
             r_long = sum(r_longs) / len(r_longs)
             mean = p_t_latent
+            # Predictive-variance decomposition: epistemic = disagreement across
+            # heads; aleatoric = mean per-head Bernoulli variance (irreducible).
             u = sum((p - mean) ** 2 for p in p_ts) / len(p_ts)
+            u_aleatoric = sum(p * (1.0 - p) for p in p_ts) / len(p_ts)
             return LatentPrediction(
                 branch_id=branch_id,
                 p_t_latent=p_t_latent,
                 r_long=r_long,
                 u=u,
+                u_aleatoric=u_aleatoric,
                 per_head_p_t=p_ts,
             )
 
@@ -219,12 +223,14 @@ class LatentEnsemble:
         ]
         mean = sum(per_head) / self.M
         u = sum((p - mean) ** 2 for p in per_head) / self.M
+        u_aleatoric = sum(p * (1.0 - p) for p in per_head) / self.M
         r_long = min(1.0, 0.2 + 0.6 * complexity)
         return LatentPrediction(
             branch_id=branch_id,
             p_t_latent=mean,
             r_long=r_long,
             u=u,
+            u_aleatoric=u_aleatoric,
             per_head_p_t=per_head,
         )
 

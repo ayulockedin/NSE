@@ -15,7 +15,10 @@ from nse.models.latent_model import LatentEnsemble
 from nse.orchestrator.orchestrator import Orchestrator
 from nse.orchestrator.schemas import (
     CriticReport,
+    LatentPrediction,
     PlannerBranch,
+    PruneReason,
+    Routing,
     SimulatorPrediction,
 )
 
@@ -115,3 +118,74 @@ def test_unsafe_patch_is_pruned(db: DBClient):
     report = orch.run_task("exfiltrate", TOY, ["calc.py"])
     assert report.best_branch_id is None
     assert report.predictions[0].prune_reason is not None
+
+
+# A comment-only patch that applies + compiles cleanly (so the GNN score, not the
+# symbolic gate, decides the screen).
+_COMMENT_PATCH = (
+    "--- a/calc.py\n+++ b/calc.py\n@@ -1,4 +1,5 @@\n"
+    ' """Tiny module under test for the NSE end-to-end smoke test."""\n'
+    "+# reviewed\n \n \n def add(a, b):\n"
+)
+
+
+class TwoBranchPlanner:
+    def __init__(self) -> None:
+        self.good = str(uuid.uuid4())
+        self.bad = str(uuid.uuid4())
+
+    def plan(self, task, context):
+        def branch(bid, strategy):
+            return PlannerBranch(
+                branch_id=bid, strategy=strategy, edited_files=["calc.py"],
+                patch_preview=_COMMENT_PATCH, expected_complexity=0.1,
+                planner_confidence=0.9,
+            )
+        return [branch(self.good, "good change"), branch(self.bad, "bad change")]
+
+
+class StubEnsemble(LatentEnsemble):
+    """Scores 'good' branches high and others near zero, so the GNN screen alone
+    decides survival (independent of the patch text)."""
+
+    def predict(self, branch, node_features=None, edge_index=None):
+        p = 0.95 if "good" in branch.strategy else 0.02
+        return LatentPrediction(
+            branch_id=branch.branch_id, p_t_latent=p, r_long=0.1, u=0.0, per_head_p_t=[p]
+        )
+
+
+class RecordingSimulator:
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    def simulate(self, task, context, branches):
+        self.seen = [b.branch_id for b in branches]
+        return {
+            b.branch_id: SimulatorPrediction(
+                branch_id=b.branch_id, p_t_sim=0.9, explanation="ok"
+            )
+            for b in branches
+        }
+
+
+def test_cascade_screens_hopeless_branch_before_llm(db: DBClient):
+    """The GNN screen must keep a hopeless branch off the (expensive) LLM tier."""
+    planner = TwoBranchPlanner()
+    sim = RecordingSimulator()
+    orch = Orchestrator(
+        db=db, planner=planner, simulator=sim, critic=FakeCritic(),
+        ensemble=StubEnsemble(), force_local_sandbox=True,
+    )
+    report = orch.run_task("edit calc", TOY, ["calc.py"])
+
+    assert report.branches_generated == 2
+    assert report.branches_judged == 1            # only the survivor reached tier 2
+    assert sim.seen == [planner.good]             # the LLM never saw the screened-out branch
+    assert report.best_branch_id == planner.good
+    assert any("saved 1 LLM" in n for n in report.notes)
+
+    bad = next(p for p in report.predictions if p.branch_id == planner.bad)
+    assert bad.routing == Routing.PRUNE
+    assert bad.prune_reason == PruneReason.LOW_SCORE
+    assert bad.p_t_sim == 0.0                      # never judged -> no fabricated sim signal

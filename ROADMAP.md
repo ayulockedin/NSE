@@ -134,17 +134,23 @@ models:**
 - Prefix caching: ollama caches the shared prompt prefix itself; explicit vLLM
   prefix-cache verification deferred to a vLLM deployment.
 
-### Phase 10 — The Cascade & Distillation  *(the future-proofing move)*
+### Phase 10 — The Cascade & Distillation  *(the future-proofing move)*  🟢 10.1 WIRED
 **Objective:** make the neural core durable against ever-better LLMs.
 **Why:** the GNN's job becomes "cheap, calibrated filter that saves expensive
 LLM/sandbox calls" — a role that survives every model upgrade.
-- **10.1 Cost-tiered cascade** — GNN (µs) screens *k* → LLM simulator (s) judges
-  survivors → sandbox (expensive) verifies finalists. Promote the arbiter's
-  `alpha` fusion into a true cascade. *(M–H · L)*
-- **10.2 Cost-aware acquisition** — spend the next sandbox run where expected
-  info-gain per dollar is highest; adapt execute-count to suite cost. *(M · M)*
+- **10.1 Cost-tiered cascade** — ✅ **WIRED into `Orchestrator.run_task`**.
+  Tier 1 GNN screen (`_screen_branch`, no LLM) routes with the *optimistic* sim
+  prior (S(B) is monotone in p_t, so sim=1.0 prunes only the unrescuable — recall
+  preserved); Tier 2 calls the Simulator/Critic **only on survivors**; Tier 3
+  sandboxes the single finalist. Token budget now reflects only judged survivors;
+  `TaskReport` carries `branches_screened/judged` + `cost_units`. Standalone spec +
+  cost primitives in `nse/orchestrator/cascade.py` / `cost.py`.
+- **10.2 Cost-aware acquisition** — 🟡 primitives done (`cost.py`: `CostModel`,
+  `CostLedger`, `info_gain` = binary-entropy of p_t + epistemic u,
+  `rank_by_acquisition`); ledger now records per-task spend in the orchestrator.
+  **Remaining:** drive execute-count / which-branch-to-sandbox off acquisition.
 - **10.3 LLM→GNN distillation** — distill simulator judgments into the GNN
-  surrogate so it tracks the frontier. *(M–H · M)*
+  surrogate so it tracks the frontier. *(needs live LLM; not started)*
 
 ### Phase 11 — Real-World Grounding  *(parallel data track)*  ✅ **FOUNDATION DONE**
 **Objective:** close the toy→real gap; make `r_long` a measured capability.
@@ -174,16 +180,19 @@ LLM/sandbox calls" — a role that survives every model upgrade.
   EXECUTE the real fix. Reports **% resolved**, false-fix rate, abstain rate.
   Baseline on a toy 2-defect repo: heuristic resolves **0%** / abstains **100%** —
   the toy→real gap, made measurable.
-- **First real corpus mined + evaluated** (more-itertools, 10 verified bug-fix
-  pairs, `--force-local`). **% resolved, all leakage-free:** heuristic **0/10**,
-  toy GNN (synthetic-only `latent.pt`) **2/10 (0.20)**, curriculum GNN via
-  leave-one-pair-out CV **5/10 (0.50)**; mean p_t on held-out real fixes
-  0.223→**0.634**. Curriculum fine-tuning on real defects **2.5×'d % resolved** —
-  the toy→real gap measured and partially closed. *(Verification rejected
-  non-defects; measured r_long sparse in this small window.)*
-- **Next:** scale beyond one library — more pure-stdlib repos and SWE-bench/
-  Defects4J with a dep-carrying sandbox image for *trusted* (sandboxed) labels;
-  then consider grounding the shipped `latent.pt` on the combined real corpus.
+- **Real corpus mined + evaluated, 2 libs / 33 verified pairs** (more-itertools 30
+  + boltons 3; jmespath & toolz yielded 0 — their pre-py3.13 history isn't green,
+  so the fixed tree never verified; *zero false pairs* throughout). **% resolved,
+  leave-one-pair-out CV (leakage-free):** heuristic **0/33**, toy GNN
+  (synthetic-only) **10/33 (0.30)**, curriculum GNN **18/33 (0.55)**; mean p_t on
+  held-out real fixes 0.338→**0.674**. Curriculum grounding **~doubled % resolved**
+  — the toy→real gap measured and substantially closed. measured r_long nonzero
+  10/33 (max 1.0).
+- **Lesson:** mining *old* repos needs per-commit Docker envs (as SWE-bench ships);
+  a single modern interpreter only verifies modern, clean-history libs.
+- **Next:** SWE-bench/Defects4J (or more modern libs) with dep-carrying sandbox
+  images for trusted+larger numbers; then ground the shipped `latent.pt` on the
+  combined real corpus (LOPO already justifies it).
 
 ### Phase 12 — Mastery of Uncertainty & Governance
 **Objective:** principled, auditable autonomy.

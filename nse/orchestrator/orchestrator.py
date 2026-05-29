@@ -36,6 +36,7 @@ from nse.models.cpg_features import build_cpg_features, changed_function_names
 from nse.models.latent_model import LatentEnsemble, load_ensemble
 from nse.orchestrator import arbiter
 from nse.orchestrator.audit import reexecute_pruned
+from nse.orchestrator.cost import CostLedger, CostModel
 from nse.orchestrator.executor import run_sandbox, to_outcome
 from nse.orchestrator.patcher import (
     PatchApplyError,
@@ -62,6 +63,23 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+# Best-case simulator prior used by the GNN screen (Phase 10.1). Because S(B) is
+# monotonically increasing in p_t, deciding at sim=1.0 is the *optimistic*
+# feasibility test: a branch the screen prunes could not clear tau under ANY LLM
+# judgment, so screening it out spends no LLM — without hurting recall.
+SCREEN_OPTIMISTIC_SIM = 1.0
+
+
+@dataclass
+class _ScreenCtx:
+    """Per-branch context carried from the GNN screen tier to the LLM judge tier
+    so the judge re-decides identically (same coverage) and the property oracle
+    can target the edited function — without recomputing either."""
+
+    coverage_u: float = 0.0
+    edited_fns: list[str] = field(default_factory=list)
+
+
 @dataclass
 class TaskReport:
     task_id: str
@@ -73,6 +91,11 @@ class TaskReport:
     sandbox_mode: Optional[str] = None
     wall_clock_s: float = 0.0
     notes: list[str] = field(default_factory=list)
+    # Cascade telemetry (Phase 10.1): how many branches reached each tier and the
+    # total cost in CostModel units (GNN screen + LLM judge + sandbox verify).
+    branches_screened: int = 0
+    branches_judged: int = 0
+    cost_units: float = 0.0
 
 
 class Orchestrator:
@@ -103,16 +126,21 @@ class Orchestrator:
         # pruned branches. Kept next to the DB (git-ignored) -> tmp DB in tests.
         self.audit_dir = self.db.db_path.parent / "audit_snapshots"
 
-    # ── per-branch scoring ─────────────────────────────────────────────
-    def _score_branch(
+    # ── Tier 1: GNN screen (no LLM) ────────────────────────────────────
+    def _screen_branch(
         self,
         snapshot: Path,
         branch: PlannerBranch,
-        sim_p_t: float,
-        r_critic: float,
         mg: Optional[MemoryGraph] = None,
         coverage_map: Optional[dict[str, FileCoverage]] = None,
-    ) -> BranchPrediction:
+    ) -> tuple[BranchPrediction, Optional[_ScreenCtx]]:
+        """Score a branch with the symbolic gate + GNN only — the cheap tier.
+
+        Routes with the *optimistic* simulator prior (best-case LLM) so a survivor
+        is anything an LLM judgment could still rescue; only the hopeless (and
+        symbolic/unsafe failures) are pruned here, before any LLM spend. Returns
+        ``(pred, ctx)``; ``ctx`` is ``None`` for hard gate failures.
+        """
         # Apply patch into an isolated copy for the symbolic gate.
         work = Path(tempfile.mkdtemp(prefix="nse_score_"))
         repo = work / "repo"
@@ -125,9 +153,9 @@ class Orchestrator:
                     full_rewrites=branch.full_file_rewrites,
                 )
             except PatchSafetyError:
-                return self._gate_fail(branch, PruneReason.UNSAFE_PATCH)
+                return self._gate_fail(branch, PruneReason.UNSAFE_PATCH), None
             except PatchApplyError:
-                return self._gate_fail(branch, PruneReason.SYMBOLIC_FAIL)
+                return self._gate_fail(branch, PruneReason.SYMBOLIC_FAIL), None
 
             sym = symbolic_check(repo)
             # Identify the edited function(s) while the patched tree still
@@ -151,15 +179,14 @@ class Orchestrator:
             branch, node_features=node_features, edge_index=edge_index
         )
         coverage_u = self._coverage_uncertainty(branch, snapshot, coverage_map)
-        p_t = arbiter.aggregate_p_t(latent.p_t_latent, sim_p_t)
         pred = BranchPrediction(
             branch_id=branch.branch_id,
             p_c=sym.p_c,
-            p_t_sim=sim_p_t,
+            p_t_sim=SCREEN_OPTIMISTIC_SIM,
             p_t_latent=latent.p_t_latent,
-            p_t=p_t,
+            p_t=arbiter.aggregate_p_t(latent.p_t_latent, SCREEN_OPTIMISTIC_SIM),
             u=latent.u,
-            r_critic=r_critic,
+            r_critic=0.0,
             r_long=latent.r_long,
             c_planner=branch.planner_confidence,
         )
@@ -169,12 +196,20 @@ class Orchestrator:
             coverage_u=coverage_u,
             conformal_threshold=self.conformal_threshold,
         )
-        # Phase 7.3: for a branch sent to gather evidence (under-tested / no
-        # conformal guarantee), synthesize a property oracle. A new crash is
-        # unambiguous breakage -> prune; a clean run leaves it gathering evidence.
-        if pred.routing == Routing.INCREMENTAL_SANDBOX and edited_fns:
-            self._apply_oracle_evidence(pred, branch, snapshot, edited_fns[0])
-        return pred
+        if pred.routing == Routing.PRUNE:
+            # Even the best-case simulator can't clear tau -> screen it out before
+            # any LLM spend. Re-record at no-sim so the logged row is consistent
+            # (the LLM never ran); the conservative score is <= the optimistic one,
+            # so the prune still holds.
+            pred.p_t_sim = 0.0
+            pred.p_t = arbiter.aggregate_p_t(latent.p_t_latent, 0.0)
+            arbiter.decide(
+                pred,
+                recalibrator=self.recalibrator,
+                coverage_u=coverage_u,
+                conformal_threshold=self.conformal_threshold,
+            )
+        return pred, _ScreenCtx(coverage_u=coverage_u, edited_fns=edited_fns)
 
     def _apply_oracle_evidence(
         self,
@@ -258,54 +293,89 @@ class Orchestrator:
         # branch this task prunes.
         self._retain_snapshot(task_id, repo_path)
 
-        # 3. Simulator + Critic (batched per task; share the prefix). A failure in
-        # either degrades to neutral signals (the arbiter uses defaults), never a
-        # crash.
-        try:
-            sim = self.simulator.simulate(task, context, branches)
-        except AgentError as exc:
-            sim = {}
-            report.notes.append(f"simulator failed: {exc}")
-        try:
-            crit = self.critic.critique(task, context, branches)
-        except AgentError as exc:
-            crit = {}
-            report.notes.append(f"critic failed: {exc}")
-
-        # 4. Score every branch.
+        # 3. Cost-tiered cascade (Phase 10.1): GNN screen -> LLM judge survivors
+        #    -> sandbox the finalist. The LLM is never called on branches the GNN
+        #    screen already prunes, and the sandbox runs once instead of k times.
         snapshot = Path(tempfile.mkdtemp(prefix="nse_snap_")) / "repo"
         shutil.copytree(repo_path, snapshot)
+        cm = CostModel()
+        ledger = CostLedger()
         try:
+            # ── Tier 1: GNN screen (no LLM) ─────────────────────────────────
+            screened: list[tuple[PlannerBranch, BranchPrediction, Optional[_ScreenCtx]]] = []
             for b in branches:
                 check_budget()
-                sim_p_t = sim[b.branch_id].p_t_sim if b.branch_id in sim else 0.5
-                r_critic = crit[b.branch_id].r_critic if b.branch_id in crit else 0.0
-                pred = self._score_branch(
-                    snapshot, b, sim_p_t, r_critic, mg=mg, coverage_map=coverage_map
-                )
+                pred, ctx = self._screen_branch(snapshot, b, mg=mg, coverage_map=coverage_map)
+                ledger.add_gnn(cm.gnn())
+                screened.append((b, pred, ctx))
+            survivors = [(b, p, c) for (b, p, c) in screened if p.routing != Routing.PRUNE]
+            report.branches_screened = len(branches)
+            report.branches_judged = len(survivors)
+
+            # ── Tier 2: LLM judge (survivors only) ──────────────────────────
+            # A failed agent degrades to neutral signals (arbiter defaults), never
+            # a crash. The token budget now reflects only the survivors judged.
+            if survivors:
+                check_budget()
+                surv_branches = [b for b, _, _ in survivors]
+                try:
+                    sim = self.simulator.simulate(task, context, surv_branches)
+                except AgentError as exc:
+                    sim = {}
+                    report.notes.append(f"simulator failed: {exc}")
+                try:
+                    crit = self.critic.critique(task, context, surv_branches)
+                except AgentError as exc:
+                    crit = {}
+                    report.notes.append(f"critic failed: {exc}")
+                for b, pred, ctx in survivors:
+                    sim_p_t = sim[b.branch_id].p_t_sim if b.branch_id in sim else 0.5
+                    r_critic = crit[b.branch_id].r_critic if b.branch_id in crit else 0.0
+                    pred.p_t_sim = sim_p_t
+                    pred.r_critic = r_critic
+                    pred.p_t = arbiter.aggregate_p_t(pred.p_t_latent, sim_p_t)
+                    arbiter.decide(
+                        pred,
+                        recalibrator=self.recalibrator,
+                        coverage_u=ctx.coverage_u if ctx else 0.0,
+                        conformal_threshold=self.conformal_threshold,
+                    )
+                    # Phase 7.3 oracle: a branch sent to gather evidence gets a
+                    # property check; a new crash is unambiguous breakage -> prune.
+                    if pred.routing == Routing.INCREMENTAL_SANDBOX and ctx and ctx.edited_fns:
+                        self._apply_oracle_evidence(pred, b, snapshot, ctx.edited_fns[0])
+            tokens = sum(
+                getattr(a, "tokens_used", 0) for a in (self.simulator, self.critic)
+            )
+            ledger.add_llm(cm.llm(tokens))
+
+            # Log every branch's final prediction (screen-pruned + judged).
+            for b, pred, _ in screened:
                 report.predictions.append(pred)
                 self.db.insert_prediction(pred)
                 if pred.routing == Routing.PRUNE and pred.prune_reason:
                     self.db.insert_pruned(b.branch_id, pred.prune_reason)
 
-            # 5. Arbiter selection.
+            saved = len(branches) - len(survivors)
+
+            # ── Arbiter selection ───────────────────────────────────────────
             best = arbiter.select_best(report.predictions)
             if best is None:
-                # Nothing executable; surface uncertainty-routed branches.
                 routed = [
                     p for p in report.predictions
                     if p.routing == Routing.INCREMENTAL_SANDBOX
                 ]
                 report.notes.append(
-                    f"no branch routed to EXECUTE; "
-                    f"{len(routed)} awaiting incremental evidence"
+                    f"cascade: screened {len(branches)} -> judged {len(survivors)} "
+                    f"(saved {saved} LLM); no EXECUTE, {len(routed)} awaiting evidence"
                 )
+                report.cost_units = round(ledger.total, 4)
                 return self._finalize(report, start)
 
             report.best_branch_id = best.branch_id
             best_branch = next(b for b in branches if b.branch_id == best.branch_id)
 
-            # 6. Apply best patch to snapshot and sandbox-execute.
+            # ── Tier 3: sandbox the single finalist ─────────────────────────
             check_budget()
             apply_patch_strict_then_fallback(
                 snapshot,
@@ -318,11 +388,17 @@ class Orchestrator:
                 tests_map=mg.tests_map,
                 force_local=self.force_local_sandbox,
             )
+            ledger.add_sandbox(cm.sandbox())
             outcome = to_outcome(best.branch_id, run)
             self.db.insert_outcome(outcome)
             report.outcome_compiled = outcome.compiled
             report.outcome_tests_passed = outcome.tests_passed
             report.sandbox_mode = run.mode
+            report.cost_units = round(ledger.total, 4)
+            report.notes.append(
+                f"cascade: screened {len(branches)} -> judged {len(survivors)} "
+                f"(saved {saved} LLM) -> sandbox x1; cost {ledger.total:.3f}"
+            )
         finally:
             shutil.rmtree(snapshot.parent, ignore_errors=True)
 

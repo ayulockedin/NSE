@@ -21,6 +21,7 @@ from typing import Optional
 from pathlib import Path
 
 from nse.config import ROOT, SETTINGS
+from nse.models.cpg_features import CPG_NODE_DIM
 from nse.orchestrator.schemas import LatentPrediction, PlannerBranch
 
 try:
@@ -77,7 +78,7 @@ if _TORCH:
     class LatentModel(nn.Module):
         def __init__(
             self,
-            emb_dim: int = 32,
+            emb_dim: int = CPG_NODE_DIM,
             patch_dim: int = PATCH_FEATURE_DIM,
             hidden: int = 256,
             M: int = SETTINGS.hp.M,
@@ -139,29 +140,55 @@ class LatentEnsemble:
         ]
 
     # ── inference ──────────────────────────────────────────────────────
-    def predict(self, branch: PlannerBranch) -> LatentPrediction:
-        """Score a planner branch. Delegates to :meth:`predict_from_features`."""
+    def predict(
+        self,
+        branch: PlannerBranch,
+        node_features: Optional[list[list[float]]] = None,
+        edge_index: Optional[list[list[int]]] = None,
+    ) -> LatentPrediction:
+        """Score a planner branch. Delegates to :meth:`predict_from_features`.
+
+        ``node_features`` / ``edge_index`` are the CPG-lite graph for the edited
+        file (from :func:`nse.models.cpg_features.build_cpg_features`). When
+        omitted the model falls back to a single neutral node.
+        """
         feats = self.patch_features(branch)
-        return self.predict_from_features(feats, branch_id=branch.branch_id)
+        return self.predict_from_features(
+            feats,
+            branch_id=branch.branch_id,
+            node_features=node_features,
+            edge_index=edge_index,
+        )
 
     def predict_from_features(
-        self, feats: list[float], branch_id: str = ""
+        self,
+        feats: list[float],
+        branch_id: str = "",
+        node_features: Optional[list[list[float]]] = None,
+        edge_index: Optional[list[list[int]]] = None,
     ) -> LatentPrediction:
-        """Score a raw 6-dim patch-feature vector.
+        """Score a raw 6-dim patch-feature vector against an optional CPG graph.
 
         Decoupled from ``PlannerBranch`` so the eval harness and training loop
         can score serialised feature vectors directly. ``feats[4]`` is the
-        branch's ``expected_complexity``.
+        branch's ``expected_complexity``. ``node_features``/``edge_index`` carry
+        the depth-1 CPG subgraph; absent them we use a single neutral node so the
+        GNN contributes a constant and the patch encoder drives the prediction.
         """
         if _TORCH and self.model is not None:
             with torch.no_grad():  # type: ignore[union-attr]
-                # Minimal single-node graph: feature vector from complexity.
-                g_x = torch.zeros((1, 32))
-                g_x[0, 0] = feats[4]
-                edge_index = torch.empty((2, 0), dtype=torch.long)
-                batch = torch.zeros(1, dtype=torch.long)
+                if node_features:
+                    g_x = torch.tensor(node_features, dtype=torch.float32)
+                    ei = edge_index or [[], []]
+                    edge = torch.tensor(ei, dtype=torch.long)
+                    if edge.numel() == 0:
+                        edge = torch.empty((2, 0), dtype=torch.long)
+                else:
+                    g_x = torch.zeros((1, CPG_NODE_DIM))
+                    edge = torch.empty((2, 0), dtype=torch.long)
+                batch = torch.zeros(g_x.size(0), dtype=torch.long)
                 patch_emb = torch.tensor([feats], dtype=torch.float32)
-                outs = self.model(g_x, edge_index, batch, patch_emb)
+                outs = self.model(g_x, edge, batch, patch_emb)
                 p_ts = [float(o[0, 0]) for o in outs]
                 r_longs = [float(o[0, 1]) for o in outs]
             p_t_latent = sum(p_ts) / len(p_ts)
@@ -234,6 +261,18 @@ def load_ensemble(path: Optional[Path] = None, strict: bool = True) -> "LatentEn
             raise FileNotFoundError(f"no latent weights at {path}")
         return LatentEnsemble()
     model = LatentModel()  # type: ignore[call-arg]
-    model.load_state_dict(torch.load(path, map_location="cpu"))  # type: ignore[union-attr]
+    try:
+        model.load_state_dict(torch.load(path, map_location="cpu"))  # type: ignore[union-attr]
+    except (RuntimeError, KeyError) as exc:
+        # A weights file whose shapes no longer match the current architecture
+        # (e.g. saved before the CPG-feature change). Fail loudly only when the
+        # caller demanded weights; otherwise degrade to the heuristic so the
+        # orchestrator keeps running on stale checkpoints instead of crashing.
+        if strict:
+            raise
+        import warnings
+
+        warnings.warn(f"incompatible latent weights at {path}: {exc}; using heuristic")
+        return LatentEnsemble()
     model.eval()
     return LatentEnsemble(model=model)

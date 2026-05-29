@@ -20,6 +20,8 @@ Immutable invariant: a branch is *never* pruned solely because u > u_max.
 
 from __future__ import annotations
 
+from typing import Callable, Optional
+
 from nse.config import SETTINGS
 from nse.orchestrator.schemas import (
     BranchPrediction,
@@ -38,23 +40,34 @@ def normalize_uncertainty(u: float) -> float:
     return min(1.0, max(0.0, u_norm))
 
 
-def score(pred: BranchPrediction) -> float:
-    """Compute S(B). Assumes ``pred.p_t`` already aggregated."""
+def score(pred: BranchPrediction, p_t: float | None = None) -> float:
+    """Compute S(B). Assumes ``pred.p_t`` already aggregated.
+
+    ``p_t`` overrides the value used in the score (e.g. a recalibrated p_t)
+    without mutating ``pred.p_t``, which stays the raw logged value.
+    """
     hp = SETTINGS.hp
+    p_t = pred.p_t if p_t is None else p_t
     u_norm = normalize_uncertainty(pred.u)
-    base = pred.p_c * pred.p_t * pred.c_planner
+    base = pred.p_c * p_t * pred.c_planner
     penalty = (
         hp.lambda1 * pred.r_critic
         + hp.lambda2 * pred.r_long
-        + hp.lambda3 * u_norm * (1.0 - pred.p_t)
+        + hp.lambda3 * u_norm * (1.0 - p_t)
     )
     return base - penalty
 
 
-def decide(pred: BranchPrediction) -> BranchPrediction:
+def decide(
+    pred: BranchPrediction,
+    recalibrator: Optional[Callable[[float], float]] = None,
+) -> BranchPrediction:
     """Populate ``score``, ``routing`` and ``prune_reason`` on a prediction.
 
-    Returns the same object (mutated) for convenient chaining.
+    Returns the same object (mutated) for convenient chaining. A ``recalibrator``
+    (from the calibration loop) maps the aggregated ``p_t`` to a calibrated value
+    used for scoring/routing only — ``pred.p_t`` keeps the raw value so the next
+    calibration round fits raw->outcome and stays idempotent.
     """
     hp = SETTINGS.hp
 
@@ -64,7 +77,8 @@ def decide(pred: BranchPrediction) -> BranchPrediction:
         pred.prune_reason = PruneReason.SYMBOLIC_FAIL
         return pred
 
-    pred.score = score(pred)
+    p_t_eff = recalibrator(pred.p_t) if recalibrator is not None else pred.p_t
+    pred.score = score(pred, p_t_eff)
 
     if pred.u > hp.u_max:
         # High epistemic uncertainty -> gather evidence, do NOT prune.

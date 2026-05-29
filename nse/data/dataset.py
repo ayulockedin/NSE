@@ -17,10 +17,12 @@ import json
 import shutil
 import tempfile
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from nse.data.mutate import generate_mutations, normalized_source
+from nse.memory_graph.graph_db import MemoryGraph
+from nse.models.cpg_features import blast_radius, build_cpg_features
 from nse.models.latent_model import LatentEnsemble
 from nse.orchestrator.executor import run_sandbox
 from nse.orchestrator.schemas import PlannerBranch
@@ -38,6 +40,13 @@ class LabeledExample:
     file: str
     sandbox_mode: str       # "docker" | "local_unsafe"
     runtime: float
+    # CPG-lite graph centered on the edited function (depth-1). Defaults keep
+    # older datasets / synthetic rows loadable.
+    node_features: list[list[float]] = field(default_factory=list)
+    edge_index: list[list[int]] = field(default_factory=lambda: [[], []])
+    # Structural long-term-risk target for the r_long head: blast radius of the
+    # edited function (normalized transitive caller count), in [0, 1].
+    r_long_target: float = 0.0
 
 
 def _complexity(diff: str) -> float:
@@ -76,12 +85,29 @@ def build_examples(
     repo_dir = Path(repo_dir)
     examples: list[LabeledExample] = []
 
+    # One CPG-lite graph over the pristine repo; the depth-1 subgraph and blast
+    # radius are per edited *function*, so cache by (file, function).
+    mg = MemoryGraph(repo_dir).build_graph()
+    cpg_cache: dict[tuple[str, str], tuple[list[list[float]], list[list[int]]]] = {}
+    risk_cache: dict[tuple[str, str], float] = {}
+
     for rel in source_files:
         original = (repo_dir / rel).read_text(encoding="utf-8")
         # Diff against the normalized baseline so the feature vector reflects
         # only the mutation, not ast.unparse's whole-file reformatting.
         baseline = normalized_source(original)
         for mut in generate_mutations(original):
+            key = (rel, mut.function)
+            node_features, edge_index = cpg_cache.setdefault(
+                key,
+                build_cpg_features(
+                    mg, [rel], center_functions=[mut.function] if mut.function else None
+                ),
+            )
+            r_long_target = risk_cache.setdefault(
+                key,
+                blast_radius(mg, f"{rel}::{mut.function}") if mut.function else 0.0,
+            )
             diff = _unified_diff(baseline, mut.mutated_src, rel)
             branch = PlannerBranch(
                 branch_id=str(uuid.uuid4()),
@@ -114,6 +140,9 @@ def build_examples(
                     file=rel,
                     sandbox_mode=run.mode,
                     runtime=run.runtime,
+                    node_features=node_features,
+                    edge_index=edge_index,
+                    r_long_target=r_long_target,
                 )
             )
     return examples

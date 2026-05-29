@@ -10,7 +10,13 @@ import pytest
 
 from nse.data.dataset import LabeledExample
 from nse.models.latent_model import _TORCH, LatentEnsemble, load_ensemble, save_model
-from nse.models.train import stratified_split, train
+from nse.models.train import (
+    cross_validate,
+    grouped_folds_by_file,
+    stratified_kfold,
+    stratified_split,
+    train,
+)
 
 pytestmark = pytest.mark.skipif(not _TORCH, reason="torch not installed")
 
@@ -64,6 +70,35 @@ def test_training_beats_heuristic_on_learnable_signal():
     # so it cannot rank these examples — the trained model must do strictly
     # better on both discrimination (AUC) and calibration (Brier).
     assert trained.auc is not None
+    assert trained.auc > base.auc
+    assert trained.brier < base.brier
+
+
+def test_stratified_kfold_covers_all_indices_once():
+    examples = _synthetic(50)
+    folds = stratified_kfold(examples, k=5, seed=1)
+    assert len(folds) == 5
+    flat = [i for fold in folds for i in fold]
+    assert sorted(flat) == list(range(len(examples)))  # partition, no overlap
+    # every fold sees both classes given the stratification
+    for fold in folds:
+        assert {examples[i].label for i in fold} == {0, 1}
+
+
+def test_grouped_folds_split_by_file():
+    a = LabeledExample([0.0] * 6, 1, False, "k", "d", "a.py", "local_unsafe", 0.0)
+    b = LabeledExample([0.0] * 6, 0, True, "k", "d", "b.py", "local_unsafe", 0.0)
+    folds = grouped_folds_by_file([a, b, a, b])
+    assert len(folds) == 2
+    assert all(len(f) == 2 for f in folds)  # two rows per file
+
+
+def test_cross_validation_beats_heuristic_on_learnable_signal():
+    data = _synthetic(120)
+    base, trained = cross_validate(data, k=4, epochs=120, seed=5)
+    # Pooled out-of-fold: the trained model must generalize past the heuristic
+    # on data it never trained on, fold by fold.
+    assert trained.auc is not None and base.auc is not None
     assert trained.auc > base.auc
     assert trained.brier < base.brier
 

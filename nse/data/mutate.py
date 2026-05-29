@@ -52,6 +52,31 @@ class Mutation:
     description: str     # human-readable, e.g. "Add->Sub @ binop#0"
     mutated_src: str     # full mutated source
     assumed_breaking: bool
+    function: str = ""   # enclosing function name ("" = module scope)
+
+
+def _scope_map(tree: ast.AST) -> dict[int, str]:
+    """Map ``id(node) -> enclosing function name`` for every node in ``tree``.
+
+    Walks top-down so an inner function overrides the outer one, giving the
+    *innermost* enclosing function (module-level nodes map to "")."""
+    out: dict[int, str] = {}
+
+    def visit(node: ast.AST, current: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for d in ast.walk(child):
+                    out[id(d)] = child.name
+                visit(child, child.name)
+            else:
+                visit(child, current)
+
+    visit(tree, "")
+    return out
+
+
+def _enclosing_function(tree: ast.AST, node: ast.AST) -> str:
+    return _scope_map(tree).get(id(node), "")
 
 
 def _unparse(tree: ast.AST) -> str:
@@ -78,6 +103,7 @@ def _binop_mutants(tree: ast.Module) -> Iterator[Mutation]:
     for i in range(len(_nodes(tree, pred))):
         new = copy.deepcopy(tree)
         node = _nodes(new, pred)[i]
+        fn = _enclosing_function(new, node)
         old_name = type(node.op).__name__
         node.op = _BINOP_SWAP[type(node.op)]()  # type: ignore[union-attr]
         yield Mutation(
@@ -85,6 +111,7 @@ def _binop_mutants(tree: ast.Module) -> Iterator[Mutation]:
             description=f"{old_name}->{type(node.op).__name__} @ binop#{i}",
             mutated_src=_unparse(new),
             assumed_breaking=True,
+            function=fn,
         )
 
 
@@ -98,6 +125,7 @@ def _compare_mutants(tree: ast.Module) -> Iterator[Mutation]:
     for i in range(len(_nodes(tree, pred))):
         new = copy.deepcopy(tree)
         node = _nodes(new, pred)[i]
+        fn = _enclosing_function(new, node)
         for j, op in enumerate(node.ops):  # type: ignore[union-attr]
             if type(op) in _CMP_SWAP:
                 old_name = type(op).__name__
@@ -107,6 +135,7 @@ def _compare_mutants(tree: ast.Module) -> Iterator[Mutation]:
                     description=f"{old_name}->{type(node.ops[j]).__name__} @ cmp#{i}",
                     mutated_src=_unparse(new),
                     assumed_breaking=True,
+                    function=fn,
                 )
                 break
 
@@ -118,6 +147,7 @@ def _boolop_mutants(tree: ast.Module) -> Iterator[Mutation]:
     for i in range(len(_nodes(tree, pred))):
         new = copy.deepcopy(tree)
         node = _nodes(new, pred)[i]
+        fn = _enclosing_function(new, node)
         old_name = type(node.op).__name__
         node.op = _BOOL_SWAP[type(node.op)]()  # type: ignore[union-attr]
         yield Mutation(
@@ -125,6 +155,7 @@ def _boolop_mutants(tree: ast.Module) -> Iterator[Mutation]:
             description=f"{old_name}->{type(node.op).__name__} @ boolop#{i}",
             mutated_src=_unparse(new),
             assumed_breaking=True,
+            function=fn,
         )
 
 
@@ -140,6 +171,7 @@ def _constant_mutants(tree: ast.Module) -> Iterator[Mutation]:
     for i in range(len(_nodes(tree, _is_number))):
         new = copy.deepcopy(tree)
         node = _nodes(new, _is_number)[i]
+        fn = _enclosing_function(new, node)
         old = node.value  # type: ignore[union-attr]
         node.value = old + 1  # type: ignore[union-attr]
         yield Mutation(
@@ -147,6 +179,7 @@ def _constant_mutants(tree: ast.Module) -> Iterator[Mutation]:
             description=f"{old}->{old + 1} @ const#{i}",
             mutated_src=_unparse(new),
             assumed_breaking=True,
+            function=fn,
         )
 
     def is_bool(n: ast.AST) -> bool:
@@ -155,6 +188,7 @@ def _constant_mutants(tree: ast.Module) -> Iterator[Mutation]:
     for i in range(len(_nodes(tree, is_bool))):
         new = copy.deepcopy(tree)
         node = _nodes(new, is_bool)[i]
+        fn = _enclosing_function(new, node)
         old = node.value  # type: ignore[union-attr]
         node.value = not old  # type: ignore[union-attr]
         yield Mutation(
@@ -162,6 +196,7 @@ def _constant_mutants(tree: ast.Module) -> Iterator[Mutation]:
             description=f"{old}->{not old} @ bool#{i}",
             mutated_src=_unparse(new),
             assumed_breaking=True,
+            function=fn,
         )
 
 
@@ -186,6 +221,7 @@ def _benign_mutants(tree: ast.Module) -> Iterator[Mutation]:
             description=f"noop in {fn.name}",  # type: ignore[union-attr]
             mutated_src=_unparse(new),
             assumed_breaking=False,
+            function=fn.name,  # type: ignore[union-attr]
         )
 
 

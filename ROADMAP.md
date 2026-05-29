@@ -134,7 +134,7 @@ models:**
 - Prefix caching: ollama caches the shared prompt prefix itself; explicit vLLM
   prefix-cache verification deferred to a vLLM deployment.
 
-### Phase 10 — The Cascade & Distillation  *(the future-proofing move)*  🟢 10.1 WIRED
+### Phase 10 — The Cascade & Distillation  *(the future-proofing move)*  🟢 10.1+10.2 WIRED
 **Objective:** make the neural core durable against ever-better LLMs.
 **Why:** the GNN's job becomes "cheap, calibrated filter that saves expensive
 LLM/sandbox calls" — a role that survives every model upgrade.
@@ -145,12 +145,14 @@ LLM/sandbox calls" — a role that survives every model upgrade.
   sandboxes the single finalist. Token budget now reflects only judged survivors;
   `TaskReport` carries `branches_screened/judged` + `cost_units`. Standalone spec +
   cost primitives in `nse/orchestrator/cascade.py` / `cost.py`.
-- **10.2 Cost-aware acquisition** — 🟡 primitives done (`cost.py`: `CostModel`,
-  `CostLedger`, `info_gain` = binary-entropy of p_t + epistemic u,
-  `rank_by_acquisition`); ledger now records per-task spend in the orchestrator.
-  **Remaining:** drive execute-count / which-branch-to-sandbox off acquisition.
+- **10.2 Cost-aware acquisition** — ✅ **WIRED into `Orchestrator.run_task`**.
+  When the cascade finds no EXECUTE finalist, it spends remaining sandbox budget
+  on the most-informative uncertain (INCREMENTAL_SANDBOX) branches — ranked by
+  `info_gain` per run (binary-entropy of p_t + epistemic u) — and the first that
+  passes resolves the task, bounded by `max_sandbox_executions_per_task`.
+  Primitives in `cost.py`; per-task spend recorded in the ledger (`cost_units`).
 - **10.3 LLM→GNN distillation** — distill simulator judgments into the GNN
-  surrogate so it tracks the frontier. *(needs live LLM; not started)*
+  surrogate so it tracks the frontier. *(needs live LLM — now available)*
 
 ### Phase 11 — Real-World Grounding  *(parallel data track)*  ✅ **FOUNDATION DONE**
 **Objective:** close the toy→real gap; make `r_long` a measured capability.

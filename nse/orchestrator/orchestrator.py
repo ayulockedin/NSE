@@ -36,7 +36,7 @@ from nse.models.cpg_features import build_cpg_features, changed_function_names
 from nse.models.latent_model import LatentEnsemble, load_ensemble
 from nse.orchestrator import arbiter
 from nse.orchestrator.audit import reexecute_pruned
-from nse.orchestrator.cost import CostLedger, CostModel
+from nse.orchestrator.cost import CostLedger, CostModel, rank_by_acquisition
 from nse.orchestrator.executor import run_sandbox, to_outcome
 from nse.orchestrator.patcher import (
     PatchApplyError,
@@ -357,52 +357,74 @@ class Orchestrator:
                     self.db.insert_pruned(b.branch_id, pred.prune_reason)
 
             saved = len(branches) - len(survivors)
+            max_runs = SETTINGS.budgets.max_sandbox_executions_per_task
+            sandbox_runs = 0
 
-            # ── Arbiter selection ───────────────────────────────────────────
+            # ── Tier 3: sandbox the finalist ────────────────────────────────
             best = arbiter.select_best(report.predictions)
-            if best is None:
-                routed = [
-                    p for p in report.predictions
-                    if p.routing == Routing.INCREMENTAL_SANDBOX
-                ]
+            if best is not None:
+                best_branch = next(b for b in branches if b.branch_id == best.branch_id)
+                check_budget()
+                run = self._apply_and_run(snapshot, best_branch, mg.tests_map)
+                ledger.add_sandbox(cm.sandbox())
+                sandbox_runs += 1
+                outcome = to_outcome(best.branch_id, run)
+                self.db.insert_outcome(outcome)
+                report.best_branch_id = best.branch_id
+                report.outcome_compiled = outcome.compiled
+                report.outcome_tests_passed = outcome.tests_passed
+                report.sandbox_mode = run.mode
                 report.notes.append(
                     f"cascade: screened {len(branches)} -> judged {len(survivors)} "
-                    f"(saved {saved} LLM); no EXECUTE, {len(routed)} awaiting evidence"
+                    f"(saved {saved} LLM) -> sandbox x{sandbox_runs}; cost {ledger.total:.3f}"
                 )
                 report.cost_units = round(ledger.total, 4)
                 return self._finalize(report, start)
 
-            report.best_branch_id = best.branch_id
-            best_branch = next(b for b in branches if b.branch_id == best.branch_id)
+            # ── No EXECUTE: cost-aware acquisition (Phase 10.2) ─────────────
+            # Spend any remaining sandbox budget on the most-informative uncertain
+            # branches (info-gain per run); the first that passes resolves the task.
+            incrementals = [
+                (b, p) for (b, p, _) in screened
+                if p.routing == Routing.INCREMENTAL_SANDBOX
+            ]
+            ranked = (
+                rank_by_acquisition(
+                    [((b, p), p.p_t, p.u) for b, p in incrementals], cost=cm.sandbox()
+                )
+                if incrementals
+                else []
+            )
+            for b, p in ranked:
+                if sandbox_runs >= max_runs:
+                    break
+                check_budget()
+                run = self._apply_and_run(snapshot, b, mg.tests_map)
+                ledger.add_sandbox(cm.sandbox())
+                sandbox_runs += 1
+                self.db.insert_outcome(to_outcome(b.branch_id, run))
+                if run.tests_passed:
+                    report.best_branch_id = b.branch_id
+                    report.outcome_compiled = 1
+                    report.outcome_tests_passed = 1
+                    report.sandbox_mode = run.mode
+                    report.notes.append(
+                        f"cascade: screened {len(branches)} -> judged {len(survivors)} "
+                        f"(saved {saved} LLM); acquisition resolved an uncertain branch "
+                        f"in {sandbox_runs} evidence run(s); cost {ledger.total:.3f}"
+                    )
+                    report.cost_units = round(ledger.total, 4)
+                    return self._finalize(report, start)
 
-            # ── Tier 3: sandbox the single finalist ─────────────────────────
-            check_budget()
-            apply_patch_strict_then_fallback(
-                snapshot,
-                patch_text=best_branch.patch_preview,
-                full_rewrites=best_branch.full_file_rewrites,
-            )
-            run = run_sandbox(
-                snapshot,
-                edited_files=best_branch.edited_files,
-                tests_map=mg.tests_map,
-                force_local=self.force_local_sandbox,
-            )
-            ledger.add_sandbox(cm.sandbox())
-            outcome = to_outcome(best.branch_id, run)
-            self.db.insert_outcome(outcome)
-            report.outcome_compiled = outcome.compiled
-            report.outcome_tests_passed = outcome.tests_passed
-            report.sandbox_mode = run.mode
-            report.cost_units = round(ledger.total, 4)
             report.notes.append(
                 f"cascade: screened {len(branches)} -> judged {len(survivors)} "
-                f"(saved {saved} LLM) -> sandbox x1; cost {ledger.total:.3f}"
+                f"(saved {saved} LLM); no EXECUTE, {len(incrementals)} uncertain, "
+                f"{sandbox_runs} evidence run(s), none passed"
             )
+            report.cost_units = round(ledger.total, 4)
+            return self._finalize(report, start)
         finally:
             shutil.rmtree(snapshot.parent, ignore_errors=True)
-
-        return self._finalize(report, start)
 
     @staticmethod
     def _coverage_uncertainty(
@@ -423,6 +445,28 @@ class Orchestrator:
                 counts[f] = len(fp.read_text(encoding="utf-8").splitlines())
         changed = changed_lines(branch.patch_preview, branch.full_file_rewrites, counts)
         return coverage_uncertainty(coverage_map, changed, SETTINGS.hp.coverage_u_full)
+
+    def _apply_and_run(self, pristine: Path, branch: PlannerBranch, tests_map):
+        """Apply a branch's patch to a *fresh* copy of the pristine snapshot and
+        run the sandbox. Used for the finalist and for acquisition-driven evidence
+        runs, so every sandboxed branch starts from the same clean state."""
+        work = Path(tempfile.mkdtemp(prefix="nse_exec_"))
+        repo = work / "repo"
+        try:
+            shutil.copytree(pristine, repo)
+            apply_patch_strict_then_fallback(
+                repo,
+                patch_text=branch.patch_preview,
+                full_rewrites=branch.full_file_rewrites,
+            )
+            return run_sandbox(
+                repo,
+                edited_files=branch.edited_files,
+                tests_map=tests_map,
+                force_local=self.force_local_sandbox,
+            )
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     def _retain_snapshot(self, task_id: str, repo_path: Path) -> None:
         """Copy the pristine repo aside so the audit loop can replay pruned

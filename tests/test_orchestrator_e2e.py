@@ -169,6 +169,32 @@ class RecordingSimulator:
         }
 
 
+class UncertainEnsemble(LatentEnsemble):
+    """High epistemic uncertainty -> the arbiter routes to INCREMENTAL_SANDBOX
+    (gather evidence) rather than EXECUTE."""
+
+    def predict(self, branch, node_features=None, edge_index=None):
+        return LatentPrediction(
+            branch_id=branch.branch_id, p_t_latent=0.6, r_long=0.1, u=0.3,
+            per_head_p_t=[0.3, 0.9],
+        )
+
+
+def test_acquisition_resolves_uncertain_branch_via_evidence_run(db: DBClient):
+    """Phase 10.2: with no EXECUTE finalist, spare sandbox budget is spent on the
+    most-informative uncertain branch; a passing evidence run resolves the task."""
+    orch = Orchestrator(
+        db=db, planner=FakePlanner(), simulator=FakeSimulator(), critic=FakeCritic(),
+        ensemble=UncertainEnsemble(), force_local_sandbox=True,
+    )
+    report = orch.run_task("review", TOY, ["calc.py"])
+
+    assert report.predictions[0].routing == Routing.INCREMENTAL_SANDBOX  # not EXECUTE
+    assert report.best_branch_id is not None        # resolved anyway, via evidence
+    assert report.outcome_tests_passed == 1
+    assert any("acquisition resolved" in n for n in report.notes)
+
+
 def test_cascade_screens_hopeless_branch_before_llm(db: DBClient):
     """The GNN screen must keep a hopeless branch off the (expensive) LLM tier."""
     planner = TwoBranchPlanner()

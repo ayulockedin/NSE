@@ -1,0 +1,6 @@
+# Set default behavior to let Git auto-handle line endings
+* text=auto
+
+# Force LF for shell scripts and Dockerfiles, regardless of the OS
+*.sh text eol=lf
+*Dockerfile* text eol=lf

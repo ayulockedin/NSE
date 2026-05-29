@@ -130,3 +130,9 @@ class DBClient:
             "SELECT COUNT(DISTINCT task_id) AS n FROM branches"
         ).fetchone()
         return int(row["n"])
+
+    def count_pruned_unsampled(self) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM pruned_branches WHERE sampled_for_audit = 0"
+        ).fetchone()
+        return int(row["n"])

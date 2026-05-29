@@ -56,3 +56,14 @@ def test_mutants_are_deduplicated():
     muts = generate_mutations(SAMPLE)
     srcs = [m.mutated_src for m in muts]
     assert len(srcs) == len(set(srcs))
+
+
+def test_mutants_record_enclosing_function():
+    muts = generate_mutations(SAMPLE)
+    # Every site in SAMPLE lives inside a function, so none should be "".
+    assert all(m.function for m in muts)
+    # The functions covered are exactly SAMPLE's definitions.
+    assert {m.function for m in muts} <= {"add", "gt", "both", "scale"}
+    # A binop mutant of `a + b` must be attributed to `add`.
+    add_binops = [m for m in muts if m.kind == "binop" and m.function == "add"]
+    assert add_binops

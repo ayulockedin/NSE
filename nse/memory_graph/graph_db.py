@@ -90,14 +90,11 @@ class MemoryGraph:
         return mapping
 
     # ── query ──────────────────────────────────────────────────────────
-    def get_subgraph(self, target_files: list[str], depth: int = 1) -> nx.DiGraph:
-        seeds = [
-            nid
-            for nid, data in self.g.nodes(data=True)
-            if data.get("file") in target_files
-        ]
-        keep: set[str] = set(seeds)
-        frontier = set(seeds)
+    def subgraph_from_seeds(self, seeds: list[str], depth: int = 1) -> nx.DiGraph:
+        """Depth-bounded subgraph grown from explicit seed node ids (both
+        successors and predecessors). Missing seeds are skipped."""
+        keep: set[str] = {s for s in seeds if self.g.has_node(s)}
+        frontier = set(keep)
         for _ in range(depth):
             nxt: set[str] = set()
             for nid in frontier:
@@ -106,6 +103,14 @@ class MemoryGraph:
             keep |= nxt
             frontier = nxt
         return self.g.subgraph(keep).copy()
+
+    def get_subgraph(self, target_files: list[str], depth: int = 1) -> nx.DiGraph:
+        seeds = [
+            nid
+            for nid, data in self.g.nodes(data=True)
+            if data.get("file") in target_files
+        ]
+        return self.subgraph_from_seeds(seeds, depth)
 
     def update_graph_on_patch(self, edited_files: list[str]) -> None:
         """Re-extract only the edited files and merge them back in."""

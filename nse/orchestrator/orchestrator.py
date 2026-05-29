@@ -25,6 +25,8 @@ from nse.config import SETTINGS
 from nse.db.db_client import DBClient
 from nse.memory_graph.context import get_prompt_context
 from nse.memory_graph.graph_db import MemoryGraph
+from nse.models.calibration_loop import load_recalibrator, run_audit, run_calibration
+from nse.models.cpg_features import build_cpg_features, changed_function_names
 from nse.models.latent_model import LatentEnsemble, load_ensemble
 from nse.orchestrator import arbiter
 from nse.orchestrator.executor import run_sandbox, to_outcome
@@ -77,6 +79,9 @@ class Orchestrator:
         # Auto-load trained latent weights when present; the heuristic fallback
         # keeps the pipeline running before any training has happened.
         self.ensemble = ensemble or load_ensemble(strict=False)
+        # Persisted recalibrator from the calibration loop (None until the first
+        # recalibration); applied to aggregated p_t in the arbiter.
+        self.recalibrator = load_recalibrator()
         self.force_local_sandbox = force_local_sandbox
 
     # ── per-branch scoring ─────────────────────────────────────────────
@@ -86,6 +91,7 @@ class Orchestrator:
         branch: PlannerBranch,
         sim_p_t: float,
         r_critic: float,
+        mg: Optional[MemoryGraph] = None,
     ) -> BranchPrediction:
         # Apply patch into an isolated copy for the symbolic gate.
         work = Path(tempfile.mkdtemp(prefix="nse_score_"))
@@ -104,10 +110,26 @@ class Orchestrator:
                 return self._gate_fail(branch, PruneReason.SYMBOLIC_FAIL)
 
             sym = symbolic_check(repo)
+            # Identify the edited function(s) while the patched tree still
+            # exists, so we can center the CPG subgraph exactly as the dataset
+            # builder did (per-function granularity, no train/serve skew).
+            edited_fns = (
+                changed_function_names(snapshot, repo, branch.edited_files)
+                if mg is not None and branch.edited_files
+                else []
+            )
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
-        latent = self.ensemble.predict(branch)
+        # Same CPG-lite featurizer the dataset builder used.
+        node_features, edge_index = (
+            build_cpg_features(mg, branch.edited_files, center_functions=edited_fns)
+            if mg is not None and branch.edited_files
+            else (None, None)
+        )
+        latent = self.ensemble.predict(
+            branch, node_features=node_features, edge_index=edge_index
+        )
         p_t = arbiter.aggregate_p_t(latent.p_t_latent, sim_p_t)
         pred = BranchPrediction(
             branch_id=branch.branch_id,
@@ -120,7 +142,7 @@ class Orchestrator:
             r_long=latent.r_long,
             c_planner=branch.planner_confidence,
         )
-        return arbiter.decide(pred)
+        return arbiter.decide(pred, recalibrator=self.recalibrator)
 
     @staticmethod
     def _gate_fail(branch: PlannerBranch, reason: PruneReason) -> BranchPrediction:
@@ -174,7 +196,7 @@ class Orchestrator:
                 check_budget()
                 sim_p_t = sim[b.branch_id].p_t_sim if b.branch_id in sim else 0.5
                 r_critic = crit[b.branch_id].r_critic if b.branch_id in crit else 0.0
-                pred = self._score_branch(snapshot, b, sim_p_t, r_critic)
+                pred = self._score_branch(snapshot, b, sim_p_t, r_critic, mg=mg)
                 report.predictions.append(pred)
                 self.db.insert_prediction(pred)
                 if pred.routing == Routing.PRUNE and pred.prune_reason:
@@ -220,7 +242,24 @@ class Orchestrator:
 
         return self._finalize(report, start)
 
-    @staticmethod
-    def _finalize(report: TaskReport, start: float) -> TaskReport:
+    def _finalize(self, report: TaskReport, start: float) -> TaskReport:
         report.wall_clock_s = round(time.time() - start, 3)
+        self._maybe_run_controls(report)
         return report
+
+    def _maybe_run_controls(self, report: TaskReport) -> None:
+        """Phase-6 control loop: every N tasks recalibrate on logged history and
+        sample the pruned reservoir for audit. Cadence from ``Hyperparams``."""
+        hp = SETTINGS.hp
+        n_tasks = self.db.count_tasks()
+        if hp.calibration_retrain_every and n_tasks % hp.calibration_retrain_every == 0:
+            result = run_calibration(self.db)
+            report.notes.append(
+                f"calibration: {result.action} (ece={result.ece:.3f}, n={result.n})"
+            )
+            if result.recalibrated:
+                self.recalibrator = load_recalibrator()
+        if hp.audit_every_n_tasks and n_tasks % hp.audit_every_n_tasks == 0:
+            sampled = run_audit(self.db)
+            if sampled:
+                report.notes.append(f"audit: sampled {len(sampled)} pruned branch(es)")

@@ -51,32 +51,32 @@ def predict_probs(
 ) -> list[float]:
     ensemble = ensemble or LatentEnsemble()
     return [
-        ensemble.predict_from_features(ex.features).p_t_latent for ex in examples
+        ensemble.predict_from_features(
+            ex.features,
+            node_features=ex.node_features,
+            edge_index=ex.edge_index,
+        ).p_t_latent
+        for ex in examples
     ]
 
 
-def evaluate_ensemble(
-    examples: list[LabeledExample],
-    ensemble: LatentEnsemble | None = None,
-    threshold: float = 0.5,
+def report_from_probs(
+    probs: list[float], labels: list[int], threshold: float = 0.5
 ) -> EvalReport:
-    if not examples:
-        return EvalReport(0, 0.0, 0.0, 0.0, 0.0, None, threshold)
+    """Build an :class:`EvalReport` from already-computed probabilities.
 
-    probs = predict_probs(examples, ensemble)
-    labels = [ex.label for ex in examples]
+    Shared by single-pass evaluation and cross-validation (which pools
+    out-of-fold predictions before scoring)."""
+    if not labels:
+        return EvalReport(0, 0.0, 0.0, 0.0, 0.0, None, threshold)
     n = len(labels)
     base_rate = sum(labels) / n
-
-    correct = sum(
+    accuracy = sum(
         1 for p, y in zip(probs, labels) if int(p >= threshold) == y
-    )
-    accuracy = correct / n
-
+    ) / n
     auc: float | None = None
     if _SKLEARN and 0 < sum(labels) < n:  # AUC needs both classes present
         auc = float(roc_auc_score(labels, probs))
-
     return EvalReport(
         n=n,
         base_rate=base_rate,
@@ -86,3 +86,15 @@ def evaluate_ensemble(
         auc=auc,
         threshold=threshold,
     )
+
+
+def evaluate_ensemble(
+    examples: list[LabeledExample],
+    ensemble: LatentEnsemble | None = None,
+    threshold: float = 0.5,
+) -> EvalReport:
+    if not examples:
+        return EvalReport(0, 0.0, 0.0, 0.0, 0.0, None, threshold)
+    probs = predict_probs(examples, ensemble)
+    labels = [ex.label for ex in examples]
+    return report_from_probs(probs, labels, threshold)

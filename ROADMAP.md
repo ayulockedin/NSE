@@ -134,7 +134,7 @@ models:**
 - Prefix caching: ollama caches the shared prompt prefix itself; explicit vLLM
   prefix-cache verification deferred to a vLLM deployment.
 
-### Phase 10 — The Cascade & Distillation  *(the future-proofing move)*  🟢 10.1+10.2 WIRED
+### Phase 10 — The Cascade & Distillation  *(the future-proofing move)*  ✅ COMPLETE (10.1–10.3)
 **Objective:** make the neural core durable against ever-better LLMs.
 **Why:** the GNN's job becomes "cheap, calibrated filter that saves expensive
 LLM/sandbox calls" — a role that survives every model upgrade.
@@ -151,8 +151,13 @@ LLM/sandbox calls" — a role that survives every model upgrade.
   `info_gain` per run (binary-entropy of p_t + epistemic u) — and the first that
   passes resolves the task, bounded by `max_sandbox_executions_per_task`.
   Primitives in `cost.py`; per-task spend recorded in the ledger (`cost_units`).
-- **10.3 LLM→GNN distillation** — distill simulator judgments into the GNN
-  surrogate so it tracks the frontier. *(needs live LLM — now available)*
+- **10.3 LLM→GNN distillation** — ✅ **DONE** (`nse/data/distill.py` +
+  `train()` distillation MSE). The simulator's `p_t_sim` becomes a per-row
+  `soft_label`; the GNN is trained to match it alongside the sandbox ground truth.
+  **Real run (qwen2.5-coder:7b judged 125 mutants; held-out, distilled never saw
+  these soft labels):** GNN↔teacher MAE 0.325→**0.300** (tracks the LLM closer)
+  *and* ground-truth AUC 0.938→**0.963**, Brier 0.055→**0.047** — even a noisy
+  teacher (qwen 76% accurate vs sandbox) net-improved the cheap GNN.
 
 ### Phase 11 — Real-World Grounding  *(parallel data track)*  ✅ **FOUNDATION DONE**
 **Objective:** close the toy→real gap; make `r_long` a measured capability.

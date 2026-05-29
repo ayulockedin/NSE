@@ -146,14 +146,44 @@ LLM/sandbox calls" — a role that survives every model upgrade.
 - **10.3 LLM→GNN distillation** — distill simulator judgments into the GNN
   surrogate so it tracks the frontier. *(M–H · M)*
 
-### Phase 11 — Real-World Grounding  *(parallel data track — can start anytime)*
+### Phase 11 — Real-World Grounding  *(parallel data track)*  ✅ **FOUNDATION DONE**
 **Objective:** close the toy→real gap; make `r_long` a measured capability.
-- **11.1 Real defect datasets** — SWE-bench Verified/Lite, Defects4J, BugsInPy;
-  mine (buggy→fixed) PR pairs from git history. *(H · M)*
-- **11.2 Curriculum** — mutation-pretrain → fine-tune on real defects. *(M · M)*
-- **11.3 Measured `r_long`** — temporal labels: was the patch reverted/re-patched
-  or did it cause a follow-up fix within a horizon? *(H · M)*
-- **11.4 Report % resolved** — adopt the field's real metric. *(M · L)*
+- **11.1 Real defect datasets** — ✅ **git PR-pair mining** shipped
+  (`nse/data/git_mining.py`). SWE-bench-style protocol: find fix commits, rebuild
+  the buggy tree by reverting only *source* files to the parent (fix-added tests
+  stay, so the defect is observable), then **verify by execution** — keep a pair
+  only if the buggy tree fails and the fixed tree passes in the sandbox. Each
+  verified pair → a `real_fix` (label 1, up-weighted) + a `real_regression`
+  (label 0), in the exact `LabeledExample` schema (no train/serve skew). Trees are
+  materialised via `git archive` (read-only; working tree untouched). CLI:
+  `python -m nse.data.git_mining --repo PATH --out real.jsonl`.
+  *External corpora (SWE-bench/Defects4J/BugsInPy) still TODO — the miner is the
+  general engine; point it at any clone (the sandbox image must carry that repo's
+  deps, else `--force-local`).*
+- **11.2 Curriculum** — ✅ `train.curriculum_train`: pretrain on the abundant
+  synthetic mutants, then **fine-tune on real defects** (warm-started, lower lr,
+  real examples up-weighted via `DEFAULT_REAL_WEIGHT`). CLI: `--real real.jsonl
+  --curriculum`; reports a **real-defect held-out** comparison (the honest metric
+  the synthetic held-out can't show).
+- **11.3 Measured `r_long`** — ✅ `git_mining.measured_r_long`: temporal fragility
+  = how often the fixed function is reworked in the commits that follow (replaces
+  the structural `blast_radius` proxy for real examples; falls back to it when no
+  function is attributed).
+- **11.4 Report % resolved** — ✅ `nse/eval/real_defect_eval.py`: regroups mined
+  examples into per-defect tasks and asks whether the *canonical* arbiter would
+  EXECUTE the real fix. Reports **% resolved**, false-fix rate, abstain rate.
+  Baseline on a toy 2-defect repo: heuristic resolves **0%** / abstains **100%** —
+  the toy→real gap, made measurable.
+- **First real corpus mined + evaluated** (more-itertools, 10 verified bug-fix
+  pairs, `--force-local`). **% resolved, all leakage-free:** heuristic **0/10**,
+  toy GNN (synthetic-only `latent.pt`) **2/10 (0.20)**, curriculum GNN via
+  leave-one-pair-out CV **5/10 (0.50)**; mean p_t on held-out real fixes
+  0.223→**0.634**. Curriculum fine-tuning on real defects **2.5×'d % resolved** —
+  the toy→real gap measured and partially closed. *(Verification rejected
+  non-defects; measured r_long sparse in this small window.)*
+- **Next:** scale beyond one library — more pure-stdlib repos and SWE-bench/
+  Defects4J with a dep-carrying sandbox image for *trusted* (sandboxed) labels;
+  then consider grounding the shipped `latent.pt` on the combined real corpus.
 
 ### Phase 12 — Mastery of Uncertainty & Governance
 **Objective:** principled, auditable autonomy.

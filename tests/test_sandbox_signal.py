@@ -36,3 +36,11 @@ def test_failing_run_captures_failed_test(tmp_path):
     assert run.tests_passed is False
     assert run.n_failed >= 1
     assert any("test_add" in t for t in run.failed_tests)
+
+
+def test_pytest_targets_pins_the_designated_test_set():
+    # Pin to one explicit test file; this overrides full-suite selection and is
+    # how the miner scopes around env-broken peripheral tests.
+    run = run_sandbox(TOY, pytest_targets=["test_calc.py"], force_local=True)
+    assert run.tests_passed is True
+    assert run.n_passed >= 1

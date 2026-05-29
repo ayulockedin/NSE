@@ -175,19 +175,28 @@ def run_sandbox(
     full: bool = False,
     timeout: Optional[int] = None,
     force_local: bool = False,
+    pytest_targets: Optional[list[str]] = None,
 ) -> SandboxRun:
     """Run tests for a patched snapshot in an isolated environment.
 
     The snapshot is copied to a scratch dir first so the original is untouched.
     Incremental by default: only tests mapped to ``edited_files`` run unless
     ``full=True`` or no mapping is available.
+
+    ``pytest_targets`` pins the run to explicit paths/node-ids (overriding both
+    ``full`` and the ``tests_map``) — a *designated test set*. Used when mining a
+    repo whose full suite has env-broken peripheral tests, or to scope to the one
+    module that exercises a change (faster, SWE-bench style).
     """
     repo_snapshot_path = Path(repo_snapshot_path)
     timeout = timeout or SETTINGS.sandbox.timeout_s
     edited_files = edited_files or []
     tests_map = tests_map or {}
 
-    affected = set() if full else _affected_tests(edited_files, tests_map)
+    if pytest_targets is not None:
+        affected = set(pytest_targets)
+    else:
+        affected = set() if full else _affected_tests(edited_files, tests_map)
     build_cmd = _pytest_cmd(affected)
 
     workdir = Path(tempfile.mkdtemp(prefix="nse_"))

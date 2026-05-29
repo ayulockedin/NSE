@@ -12,6 +12,7 @@ from nse.data.dataset import LabeledExample
 from nse.models.latent_model import _TORCH, LatentEnsemble, load_ensemble, save_model
 from nse.models.train import (
     cross_validate,
+    curriculum_train,
     grouped_folds_by_file,
     stratified_kfold,
     stratified_split,
@@ -112,6 +113,50 @@ def test_predictions_are_valid_probabilities():
         pred = ens.predict_from_features(ex.features)
         assert 0.0 <= pred.p_t_latent <= 1.0
         assert pred.u >= 0.0
+
+
+def _real(kind: str, label: int, n: int) -> list[LabeledExample]:
+    """Mined-style real examples carrying the same insertion/replacement signal
+    the synthetic seed uses, so curriculum fine-tuning has something to learn."""
+    added, removed = (2, 0) if label == 1 else (1, 1)
+    feats = [1.0, float(added), float(removed), 6.0, 0.1, 0.0]
+    return [
+        LabeledExample(feats, label, removed > 0, kind, "d", "real.py",
+                       "git_mined", 0.0, weight=3.0)
+        for _ in range(n)
+    ]
+
+
+def test_train_warm_start_continues_same_model():
+    data = _synthetic(60)
+    pre = train(data, epochs=20, seed=2)
+    cont = train(data, epochs=20, seed=2, init_model=pre)
+    assert cont is pre  # fine-tuning mutates and returns the same object
+
+
+def test_curriculum_without_real_is_just_pretrain():
+    seed_data = _synthetic(60)
+    model = curriculum_train(seed_data, [], epochs=30, seed=1)
+    ens = LatentEnsemble(model=model)
+    assert 0.0 <= ens.predict_from_features(seed_data[0].features).p_t_latent <= 1.0
+
+
+def test_curriculum_learns_to_rank_real_fixes_above_regressions():
+    seed_data = _synthetic(120)
+    real_fix = _real("real_fix", 1, 16)
+    real_reg = _real("real_regression", 0, 16)
+    model = curriculum_train(
+        seed_data, real_fix + real_reg, epochs=120, finetune_epochs=120, seed=7
+    )
+    ens = LatentEnsemble(model=model)
+
+    def mean_p(rows):
+        ps = [ens.predict_from_features(e.features).p_t_latent for e in rows]
+        return sum(ps) / len(ps)
+
+    fix_p, reg_p = mean_p(real_fix), mean_p(real_reg)
+    assert 0.0 <= reg_p <= 1.0 and 0.0 <= fix_p <= 1.0
+    assert fix_p > reg_p  # the fine-tuned model ranks real fixes above regressions
 
 
 def test_save_and_load_roundtrip(tmp_path):

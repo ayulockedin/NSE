@@ -123,8 +123,13 @@ def train(
     epochs: int = 300,
     lr: float = 1e-2,
     seed: int = 0,
+    init_model=None,
 ):
-    """Fit the ensemble on ``examples``. Returns the trained ``LatentModel``."""
+    """Fit the ensemble on ``examples``. Returns the trained ``LatentModel``.
+
+    ``init_model`` warm-starts from an existing model's weights (used by the
+    curriculum's fine-tuning stage) instead of random init.
+    """
     import torch
     import torch.nn.functional as F
 
@@ -148,7 +153,7 @@ def train(
     # patch features and labels by index).
     g_x, edge_index, batch = _batch_graphs(examples)
 
-    model = LatentModel()
+    model = init_model if init_model is not None else LatentModel()
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
     # Fixed per-head bootstrap masks so the M heads see different subsets and
@@ -178,6 +183,36 @@ def train(
 
     model.eval()
     return model
+
+
+def curriculum_train(
+    seed_examples: list[LabeledExample],
+    real_examples: list[LabeledExample],
+    epochs: int = 300,
+    finetune_epochs: int = 200,
+    lr: float = 1e-2,
+    finetune_lr: float = 3e-3,
+    seed: int = 0,
+):
+    """Phase 11.2 curriculum: pretrain on abundant synthetic mutants, then
+    **fine-tune on real defects** (warm-started, lower lr).
+
+    Stage 2 trains on ``seed + real`` rather than real alone so the model keeps
+    the structure learned from the many mutants while adapting to the few,
+    high-value real examples — which carry a larger ``weight`` (see
+    :data:`nse.data.git_mining.DEFAULT_REAL_WEIGHT`), so the weighted loss leans
+    into them. Falls back to a plain pretrain when no real data is supplied.
+    """
+    pre = train(seed_examples, epochs=epochs, lr=lr, seed=seed)
+    if not real_examples:
+        return pre
+    return train(
+        seed_examples + real_examples,
+        epochs=finetune_epochs,
+        lr=finetune_lr,
+        seed=seed,
+        init_model=pre,
+    )
 
 
 def model_M(model) -> int:
@@ -305,6 +340,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="merge weighted deployment examples harvested from the DB (Phase 8.1)",
     )
+    parser.add_argument(
+        "--real",
+        type=Path,
+        default=None,
+        help="JSONL of mined real-defect examples (Phase 11; see nse.data.git_mining)",
+    )
+    parser.add_argument(
+        "--curriculum",
+        action="store_true",
+        help="two-stage: pretrain on mutants -> fine-tune on real defects (needs --real)",
+    )
     parser.add_argument("--out", type=Path, default=DEFAULT_WEIGHTS_PATH)
     args = parser.parse_args(argv)
 
@@ -322,6 +368,15 @@ def main(argv: list[str] | None = None) -> int:
         harvested = harvest_training_examples(db, db.db_path.parent / "audit_snapshots")
         print(f"  + {len(harvested)} harvested deployment examples (replay flywheel)")
         examples = examples + harvested
+
+    real_examples: list[LabeledExample] = []
+    if args.real:
+        real_examples = read_jsonl(args.real)
+        r_pass = sum(e.label for e in real_examples)
+        print(
+            f"  + {len(real_examples)} real-defect examples from {args.real} "
+            f"({r_pass} fix / {len(real_examples) - r_pass} regression)"
+        )
     passed = sum(e.label for e in examples)
     print(f"  {len(examples)} examples | {passed} pass / {len(examples) - passed} fail")
 
@@ -350,17 +405,41 @@ def main(argv: list[str] | None = None) -> int:
     if not test_set or len({e.label for e in test_set}) < 2:
         print("  WARNING: held-out set lacks both classes; metrics may be degenerate.")
 
-    print(f"Training ensemble for {args.epochs} epochs ...")
-    model = train(train_set, epochs=args.epochs, lr=args.lr, seed=args.seed)
+    # Hold out a slice of the real defects too — generalization to *unseen real
+    # bugs* is the honest Phase 11 metric the synthetic held-out can't show.
+    real_train: list[LabeledExample] = []
+    real_test: list[LabeledExample] = []
+    if real_examples:
+        real_train, real_test = stratified_split(real_examples, args.test_frac, args.seed)
+        print(f"  real split: {len(real_train)} train / {len(real_test)} held-out")
+
+    if args.curriculum and real_train:
+        print(
+            f"Curriculum: pretrain {args.epochs}e on mutants -> "
+            f"fine-tune on {len(real_train)} real defects ..."
+        )
+        model = curriculum_train(
+            train_set, real_train, epochs=args.epochs, lr=args.lr, seed=args.seed
+        )
+    else:
+        print(f"Training ensemble for {args.epochs} epochs ...")
+        model = train(train_set + real_train, epochs=args.epochs, lr=args.lr, seed=args.seed)
 
     base = evaluate_ensemble(test_set, LatentEnsemble())          # heuristic
     trained = evaluate_ensemble(test_set, LatentEnsemble(model=model))
 
-    print("\n=== HELD-OUT COMPARISON ===")
+    print("\n=== HELD-OUT COMPARISON (synthetic mutants) ===")
     print("[heuristic baseline]")
     print(base.render())
     print("\n[trained GNN ensemble]")
     print(trained.render())
+
+    if real_test:
+        print("\n=== REAL-DEFECT HELD-OUT (the toy->real gap) ===")
+        print("[heuristic baseline]")
+        print(evaluate_ensemble(real_test, LatentEnsemble()).render())
+        print("\n[trained GNN ensemble]")
+        print(evaluate_ensemble(real_test, LatentEnsemble(model=model)).render())
 
     # r_long sanity: does the supervised head track the blast-radius target on
     # held-out data, and does an untrained ensemble not?

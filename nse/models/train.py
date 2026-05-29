@@ -45,6 +45,10 @@ DATASET_PATH = ROOT / "nse" / "data" / "datasets" / "mutation_seed.jsonl"
 # Weight of the r_long (blast-radius) regression relative to the p_t BCE term.
 R_LONG_WEIGHT = 0.5
 
+# Weight of the LLM-distillation MSE (Phase 10.3): pulls the GNN's p_t toward the
+# teacher (simulator) soft label on rows that carry one. 0 disables distillation.
+DISTILL_WEIGHT = 0.5
+
 
 # ──────────────────────────── data plumbing ────────────────────────────
 
@@ -146,6 +150,15 @@ def train(
     # Per-example sample weights (Phase 8.1): replayed deployment mistakes are
     # up-weighted so retraining focuses where the model was most wrong.
     weights = torch.tensor([e.weight for e in examples], dtype=torch.float32)
+    # Teacher soft labels (Phase 10.3) + a gate so undistilled rows are untouched.
+    softs = torch.tensor(
+        [e.soft_label if e.soft_label is not None else 0.0 for e in examples],
+        dtype=torch.float32,
+    )
+    has_soft = torch.tensor(
+        [1.0 if e.soft_label is not None else 0.0 for e in examples],
+        dtype=torch.float32,
+    )
     n = feats.size(0)
 
     # Batch the per-example CPG-lite graphs into one disjoint graph so the GNN's
@@ -174,7 +187,10 @@ def train(
             # it carries real signal (the arbiter penalizes high r_long) instead
             # of drifting untrained.
             r_loss = (head_out[:, 1] - r_targets) ** 2
-            combined = (per + R_LONG_WEIGHT * r_loss) * weights
+            # Distillation (Phase 10.3): pull p_t toward the teacher soft label,
+            # gated to rows that have one so undistilled training is unchanged.
+            distill = has_soft * (p_t - softs) ** 2
+            combined = (per + R_LONG_WEIGHT * r_loss + DISTILL_WEIGHT * distill) * weights
             denom = (mask * weights).sum().clamp(min=1.0)
             loss = loss + (combined * mask).sum() / denom
         loss = loss / len(outs)

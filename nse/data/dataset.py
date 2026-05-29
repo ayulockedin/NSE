@@ -50,6 +50,9 @@ class LabeledExample:
     # Training sample weight (Phase 8.1). Seed mutants are 1.0; replayed
     # deployment examples are up-weighted by how wrong the model was on them.
     weight: float = 1.0
+    # Teacher (LLM simulator) probability for distillation (Phase 10.3). None =
+    # no teacher signal for this row -> the distillation loss term is skipped.
+    soft_label: float | None = None
 
 
 def _complexity(diff: str) -> float:

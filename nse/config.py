@@ -32,6 +32,10 @@ class Hyperparams:
     tau_prune: float = 0.4           # score threshold below which we prune
     u_max: float = 0.15              # uncertainty above which we gather evidence
     max_variance: float = 0.25       # theoretical max variance of a [0,1] var
+    # Coverage-as-uncertainty (Phase 7.1): uncertainty assigned to a change whose
+    # edited lines are 0% covered by the existing tests. Chosen > u_max so a fully
+    # uncovered change routes to evidence-gathering instead of EXECUTE.
+    coverage_u_full: float = 0.25
 
     # Calibration / audit.
     ece_threshold: float = 0.05
@@ -39,6 +43,14 @@ class Hyperparams:
     audit_every_n_tasks: int = 100
     calibration_retrain_every: int = 50
     false_negative_alarm: float = 0.02
+    # Conformal EXECUTE gate (Phase 7.2): EXECUTE only above a threshold that
+    # holds the false-execute rate <= false_execute_alpha with confidence
+    # 1 - conformal_delta on the calibration set.
+    false_execute_alpha: float = 0.05
+    conformal_delta: float = 0.1
+    # Drift (Phase 8.3): raw-model ECE above this means recalibration can't keep
+    # up and a full retrain is recommended (> ece_threshold, which only patches).
+    drift_ece_threshold: float = 0.15
 
 
 @dataclass(frozen=True)
@@ -85,15 +97,26 @@ class SandboxConfig:
 
 @dataclass(frozen=True)
 class LLMConfig:
-    """vLLM / OpenAI-compatible inference host settings.
+    """OpenAI-compatible inference host settings.
 
-    vLLM has no native Windows wheels, so ``base_url`` defaults to the local
-    mock server (see ``nse/scripts/vllm_mock.py``).
+    Defaults target the local mock (``nse/scripts/vllm_mock.py``) so CI/tests run
+    offline. Point at a real host via env — e.g. ollama:
+        NSE_LLM_BASE_URL=http://127.0.0.1:11434/v1
+        NSE_LLM_MODEL=qwen2.5-coder:7b
+    or a WSL vLLM server. The client is provider-agnostic (plain ``/v1``).
     """
 
-    base_url: str = "http://127.0.0.1:8080/v1"
-    model: str = "llama-3-q8"
-    request_timeout_s: float = 60.0
+    base_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "NSE_LLM_BASE_URL", "http://127.0.0.1:8080/v1"
+        )
+    )
+    model: str = field(
+        default_factory=lambda: os.environ.get("NSE_LLM_MODEL", "llama-3-q8")
+    )
+    request_timeout_s: float = field(
+        default_factory=lambda: float(os.environ.get("NSE_LLM_TIMEOUT_S", "60"))
+    )
     max_retries: int = 2
     planner_temperature: float = 0.8
     simulator_temperature: float = 0.2

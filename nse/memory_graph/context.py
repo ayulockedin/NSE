@@ -59,9 +59,18 @@ def get_prompt_context(
     while nodes and _approx_tokens(serialised(nodes)) > max_tokens:
         nodes.pop()  # drop lowest-degree node
 
+    # Current source of the edited files, so a real model can produce a faithful
+    # full_file_rewrite instead of guessing (capped to bound context).
+    source: dict[str, str] = {}
+    for f in target_files:
+        path = mg.repo_root / f
+        if path.exists():
+            source[f] = path.read_text(encoding="utf-8")[:6000]
+
     return {
         "target_files": target_files,
         "nodes": nodes,
         "edges": edges,
         "affected_tests": affected_tests,
+        "source": source,
     }

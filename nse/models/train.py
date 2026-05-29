@@ -138,6 +138,9 @@ def train(
     r_targets = torch.tensor(
         [e.r_long_target for e in examples], dtype=torch.float32
     )
+    # Per-example sample weights (Phase 8.1): replayed deployment mistakes are
+    # up-weighted so retraining focuses where the model was most wrong.
+    weights = torch.tensor([e.weight for e in examples], dtype=torch.float32)
     n = feats.size(0)
 
     # Batch the per-example CPG-lite graphs into one disjoint graph so the GNN's
@@ -166,8 +169,9 @@ def train(
             # it carries real signal (the arbiter penalizes high r_long) instead
             # of drifting untrained.
             r_loss = (head_out[:, 1] - r_targets) ** 2
-            combined = per + R_LONG_WEIGHT * r_loss
-            loss = loss + (combined * mask).sum() / mask.sum().clamp(min=1.0)
+            combined = (per + R_LONG_WEIGHT * r_loss) * weights
+            denom = (mask * weights).sum().clamp(min=1.0)
+            loss = loss + (combined * mask).sum() / denom
         loss = loss / len(outs)
         loss.backward()
         opt.step()
@@ -296,6 +300,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also run leave-one-file-out CV (honest cross-file generalization)",
     )
+    parser.add_argument(
+        "--replay",
+        action="store_true",
+        help="merge weighted deployment examples harvested from the DB (Phase 8.1)",
+    )
     parser.add_argument("--out", type=Path, default=DEFAULT_WEIGHTS_PATH)
     args = parser.parse_args(argv)
 
@@ -305,6 +314,14 @@ def main(argv: list[str] | None = None) -> int:
 
     print("Loading/building dataset ...")
     examples = load_or_build(args.force_local, args.rebuild)
+    if args.replay:
+        from nse.data.replay import harvest_training_examples
+        from nse.db.db_client import DBClient
+
+        db = DBClient()
+        harvested = harvest_training_examples(db, db.db_path.parent / "audit_snapshots")
+        print(f"  + {len(harvested)} harvested deployment examples (replay flywheel)")
+        examples = examples + harvested
     passed = sum(e.label for e in examples)
     print(f"  {len(examples)} examples | {passed} pass / {len(examples) - passed} fail")
 

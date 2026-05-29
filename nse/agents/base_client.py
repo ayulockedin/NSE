@@ -23,10 +23,25 @@ class AgentError(RuntimeError):
     """Raised when an agent output cannot be parsed even after repair."""
 
 
+def llm_available(base_url: Optional[str] = None, timeout: float = 3.0) -> bool:
+    """True if an OpenAI-compatible host is reachable at ``base_url`` (or the
+    configured default). Used to gate real-LLM integration tests."""
+    base = base_url or SETTINGS.llm.base_url
+    try:
+        resp = httpx.get(f"{base}/models", timeout=timeout)
+        return resp.status_code < 500
+    except httpx.HTTPError:
+        return False
+
+
 class LLMClient:
     def __init__(self, base_url: Optional[str] = None) -> None:
         self.cfg = SETTINGS.llm
         self.base_url = base_url or self.cfg.base_url
+        self.tokens_used = 0  # cumulative total_tokens; reset per task
+
+    def reset_tokens(self) -> None:
+        self.tokens_used = 0
 
     def _chat(self, system: str, user: str, temperature: float) -> str:
         payload = {
@@ -47,7 +62,10 @@ class LLMClient:
                     timeout=self.cfg.request_timeout_s,
                 )
                 resp.raise_for_status()
-                return resp.json()["choices"][0]["message"]["content"]
+                data = resp.json()
+                usage = data.get("usage") or {}
+                self.tokens_used += int(usage.get("total_tokens", 0) or 0)
+                return data["choices"][0]["message"]["content"]
             except (httpx.HTTPError, KeyError, IndexError) as exc:
                 last_exc = exc
         raise AgentError(f"LLM request failed: {last_exc}")

@@ -141,6 +141,19 @@ class DBClient:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def labeled_predictions(self) -> list[dict[str, Any]]:
+        """(p_t, tests_passed, planner_json) for executed branches with a
+        ground-truth outcome — for per-segment competence (Phase 12.2)."""
+        rows = self._conn.execute(
+            """SELECT p.p_t AS p_t, o.tests_passed AS tests_passed,
+                      b.planner_json AS planner_json
+               FROM predictions p
+               JOIN outcomes o ON p.branch_id = o.branch_id
+               JOIN branches b ON p.branch_id = b.id
+               WHERE o.tests_passed IS NOT NULL"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_branch(self, branch_id: str) -> dict[str, Any] | None:
         """Fetch a logged branch (incl. its task_id and serialized PlannerBranch)."""
         row = self._conn.execute(

@@ -138,14 +138,5 @@ Held-out result (66 mutants across three seed modules), **trained vs heuristic**
 AUC 0.78 → **0.85**, Brier 0.27 → **0.10**, ECE 0.22 → **0.08**,
 accuracy 0.35 → **0.90**.
 
-## Status / not yet built
-
-Phase-1 foundation is complete and verified end-to-end; the Docker sandbox is
-verified, the data engine + eval harness establish a baseline, and the latent
-GNN now trains and beats that baseline on held-out data. Still to come: scaling
-training to realistic repos (and trusted Docker-labeled data), feeding real
-CPG-lite graph features into the GNN (today it runs on a single-node graph), the
-calibration retrain loop, audit-reservoir background replay, and the distilled
-fast-mode policy. Without trained weights present, the latent model falls back
-to a deterministic heuristic (`models/latent_model.py`).
+## Status (built) - Currently in Maintenance Phase
 ```

@@ -221,10 +221,15 @@ LLM/sandbox calls" — a role that survives every model upgrade.
   abstain as sequential decision-making. *(H · H, research — deferred; 10.2
   acquisition is the greedy approximation.)*
 
-### Phase 13 — Productization & Scale
-- Governance-substrate API: pluggable layer over any agent.
-- Cap audit-snapshot retention; Postgres backend; multi-repo; dashboards.
-*(ongoing)*
+### Phase 13 — Productization & Scale  🟢 ESSENTIALS DONE
+- ✅ **Governance-substrate API** (`nse/api.py`): `NSEGovernor.review(task, repo,
+  files) -> GovernanceReport` — the stable facade any agent plugs into. Runs the
+  cascade and returns the decision + verified outcome + **competence-aware
+  autonomy level** (12.2) + cost, decoupled from orchestrator internals.
+- ✅ **Capped audit-snapshot retention** (`_prune_old_snapshots`,
+  `max_audit_snapshots=500`): the oldest snapshots beyond the cap are pruned so
+  disk is bounded (kept well above the audit cadence).
+- ⬜ Remaining (infra, deferred): Postgres backend, multi-repo, dashboards.
 
 ---
 

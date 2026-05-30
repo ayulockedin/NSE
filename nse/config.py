@@ -51,6 +51,10 @@ class Hyperparams:
     audit_every_n_tasks: int = 100
     calibration_retrain_every: int = 50
     false_negative_alarm: float = 0.02
+    # Cap on retained pristine task snapshots (Phase 13): the audit loop only needs
+    # recent ones, so the oldest beyond this are pruned to bound disk. Kept well
+    # above audit_every_n_tasks so unaudited snapshots always survive.
+    max_audit_snapshots: int = 500
     # Conformal EXECUTE gate (Phase 7.2): EXECUTE only above a threshold that
     # holds the false-execute rate <= false_execute_alpha with confidence
     # 1 - conformal_delta on the calibration set.
@@ -126,9 +130,15 @@ class LLMConfig:
         default_factory=lambda: float(os.environ.get("NSE_LLM_TIMEOUT_S", "60"))
     )
     max_retries: int = 2
-    planner_temperature: float = 0.8
+    # Lowered from 0.8: a 7B coding model needs low temperature to reliably emit
+    # COMPLETE, schema-valid file rewrites; at high temp it returns prose-y
+    # strategies with no applicable patch (the cascade then prunes everything).
+    planner_temperature: float = 0.4
     simulator_temperature: float = 0.2
-    critic_temperature: float = 1.0
+    # Lowered from 1.0: at high temp the 7B red-team hallucinates risk (e.g.
+    # r_critic=0.8 for a docstring), and lambda1=1.0 then tanks an otherwise-safe
+    # score. Low temp + the calibration guidance in CRITIC_SYSTEM keep r_critic honest.
+    critic_temperature: float = 0.3
     max_output_tokens: int = 1024
 
 

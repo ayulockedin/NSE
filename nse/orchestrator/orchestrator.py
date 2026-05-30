@@ -10,6 +10,7 @@ Strict per-task budgets are enforced throughout (section 8.2).
 
 from __future__ import annotations
 
+import difflib
 import shutil
 import tempfile
 import time
@@ -288,6 +289,12 @@ class Orchestrator:
             report.notes.append(f"planner failed: {exc}")
             return self._finalize(report, start)
         report.branches_generated = len(branches)
+        # A planner that returns only a full-file rewrite (the preferred, more
+        # reliable form for small models) has no diff — derive one from the
+        # pristine repo so the latent featurizer sees the real change, not a no-op.
+        for b in branches:
+            if not b.patch_preview and b.full_file_rewrites:
+                b.patch_preview = self._diff_from_rewrites(repo_path, b.full_file_rewrites)
         for b in branches:
             self.db.insert_branch(task_id, b)
 
@@ -477,6 +484,26 @@ class Orchestrator:
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
+    @staticmethod
+    def _diff_from_rewrites(repo_path: Path | str, rewrites: dict[str, str]) -> str:
+        """Unified diff of full-file rewrites vs the current repo, so a rewrite-only
+        branch still yields a real ``patch_preview`` for feature extraction + logs."""
+        parts: list[str] = []
+        for rel, new_text in rewrites.items():
+            fp = Path(repo_path) / rel
+            old = fp.read_text(encoding="utf-8") if fp.exists() else ""
+            parts.append(
+                "".join(
+                    difflib.unified_diff(
+                        old.splitlines(keepends=True),
+                        new_text.splitlines(keepends=True),
+                        fromfile=f"a/{rel}",
+                        tofile=f"b/{rel}",
+                    )
+                )
+            )
+        return "".join(parts)
+
     def _retain_snapshot(self, task_id: str, repo_path: Path) -> None:
         """Copy the pristine repo aside so the audit loop can replay pruned
         branches against the exact state they were scored on. Heavy/regenerable
@@ -492,6 +519,20 @@ class Orchestrator:
                 "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"
             ),
         )
+        self._prune_old_snapshots(SETTINGS.hp.max_audit_snapshots)
+
+    def _prune_old_snapshots(self, max_keep: int) -> None:
+        """Bound retained snapshots (Phase 13): drop the oldest task snapshots
+        beyond ``max_keep`` so disk doesn't grow unboundedly. ``max_keep`` is set
+        well above the audit cadence, so snapshots awaiting audit always survive."""
+        if max_keep <= 0 or not self.audit_dir.exists():
+            return
+        dirs = [d for d in self.audit_dir.iterdir() if d.is_dir()]
+        if len(dirs) <= max_keep:
+            return
+        dirs.sort(key=lambda d: d.stat().st_mtime)
+        for d in dirs[: len(dirs) - max_keep]:
+            shutil.rmtree(d, ignore_errors=True)
 
     def _finalize(self, report: TaskReport, start: float) -> TaskReport:
         report.wall_clock_s = round(time.time() - start, 3)

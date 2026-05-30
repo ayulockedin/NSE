@@ -36,7 +36,11 @@ CRITIC_SYSTEM = (
     "You are CRITIC (red-team). For each branch, find a minimal failing "
     "input/scenario, concurrency or security holes. Output a JSON array of "
     "{branch_id, r_critic(0..1), identified_failures:[...], "
-    "attack_confidence(0..1)}. Strict JSON only."
+    "attack_confidence(0..1)}. CALIBRATE r_critic: use 0.0-0.1 for trivial or "
+    "clearly-safe changes (docstrings, comments, formatting, behavior-preserving "
+    "refactors) where you cannot name a concrete failing input; reserve r_critic "
+    ">0.5 only when you can state a specific input/scenario that breaks the change. "
+    "Do NOT inflate risk. Strict JSON only."
 )
 
 REPAIR_SYSTEM = (

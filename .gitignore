@@ -6,8 +6,10 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 nse/db/*.sqlite3
+nse/db/audit_snapshots/
 nse/data/datasets/*.jsonl
 nse/models/weights/*.pt
+nse/models/weights/*.json
 blueprints_extracted.txt
 _repro.py
 .claude/

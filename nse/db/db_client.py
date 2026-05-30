@@ -100,6 +100,22 @@ class DBClient:
         )
         self._conn.commit()
 
+    def insert_audit_result(
+        self,
+        pruned_id: int,
+        branch_id: str,
+        tests_passed: int | None,
+        false_negative: int,
+        runtime: float,
+    ) -> None:
+        self._conn.execute(
+            """INSERT INTO audit_results
+               (pruned_id, branch_id, tests_passed, false_negative, runtime)
+               VALUES (?, ?, ?, ?, ?)""",
+            (pruned_id, branch_id, tests_passed, false_negative, runtime),
+        )
+        self._conn.commit()
+
     # ── reads (audit / calibration) ────────────────────────────────────
     def sample_pruned_for_audit(self, limit: int) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -124,6 +140,44 @@ class DBClient:
                FROM predictions p JOIN outcomes o ON p.branch_id = o.branch_id"""
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_branch(self, branch_id: str) -> dict[str, Any] | None:
+        """Fetch a logged branch (incl. its task_id and serialized PlannerBranch)."""
+        row = self._conn.execute(
+            "SELECT id, task_id, planner_json FROM branches WHERE id = ?",
+            (branch_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def training_signals(self) -> list[dict[str, Any]]:
+        """Logged branches that now have a ground-truth label — from executed
+        outcomes and from re-executed audit results — with the prediction and
+        the branch's task_id/planner_json, for the replay flywheel (Phase 8.1)."""
+        rows = self._conn.execute(
+            """SELECT b.id AS branch_id, b.task_id AS task_id,
+                      b.planner_json AS planner_json, p.p_t AS p_t,
+                      o.tests_passed AS label, 'execute' AS source
+                 FROM outcomes o
+                 JOIN branches b ON o.branch_id = b.id
+                 JOIN predictions p ON p.branch_id = b.id
+                WHERE o.tests_passed IS NOT NULL
+               UNION ALL
+               SELECT b.id, b.task_id, b.planner_json, p.p_t,
+                      a.tests_passed, 'audit'
+                 FROM audit_results a
+                 JOIN branches b ON a.branch_id = b.id
+                 JOIN predictions p ON p.branch_id = b.id
+                WHERE a.tests_passed IS NOT NULL"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def audit_false_negative_stats(self) -> tuple[int, int]:
+        """Return ``(n_reexecuted, n_false_negatives)`` over all audit results."""
+        row = self._conn.execute(
+            """SELECT COUNT(*) AS n, COALESCE(SUM(false_negative), 0) AS fn
+               FROM audit_results WHERE tests_passed IS NOT NULL"""
+        ).fetchone()
+        return int(row["n"]), int(row["fn"])
 
     def count_tasks(self) -> int:
         row = self._conn.execute(

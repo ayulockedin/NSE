@@ -1,7 +1,11 @@
-"""End-to-end demo: drive the orchestrator against the live vLLM mock.
+"""End-to-end demo: drive the full orchestrator with a real (or mock) LLM.
 
-Prereq: start the mock first ->  python -m nse.scripts.vllm_mock
-Then:                            python -m nse.scripts.run_demo
+Real model (ollama) — no mock needed:
+    set NSE_LLM_BASE_URL=http://127.0.0.1:11434/v1
+    set NSE_LLM_MODEL=qwen2.5-coder:7b
+    python -m nse.scripts.run_demo
+
+Or against the mock: start it first (python -m nse.scripts.vllm_mock).
 """
 
 from __future__ import annotations

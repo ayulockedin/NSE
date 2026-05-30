@@ -75,10 +75,6 @@ def _scope_map(tree: ast.AST) -> dict[int, str]:
     return out
 
 
-def _enclosing_function(tree: ast.AST, node: ast.AST) -> str:
-    return _scope_map(tree).get(id(node), "")
-
-
 def _unparse(tree: ast.AST) -> str:
     ast.fix_missing_locations(tree)
     return ast.unparse(tree)
@@ -96,14 +92,15 @@ def _nodes(tree: ast.AST, predicate) -> list[ast.AST]:
     return [n for n in ast.walk(tree) if predicate(n)]
 
 
-def _binop_mutants(tree: ast.Module) -> Iterator[Mutation]:
+def _binop_mutants(tree: ast.Module, scope: dict[int, str]) -> Iterator[Mutation]:
     def pred(n: ast.AST) -> bool:
         return isinstance(n, ast.BinOp) and type(n.op) in _BINOP_SWAP
 
-    for i in range(len(_nodes(tree, pred))):
+    orig = _nodes(tree, pred)
+    for i in range(len(orig)):
         new = copy.deepcopy(tree)
         node = _nodes(new, pred)[i]
-        fn = _enclosing_function(new, node)
+        fn = scope.get(id(orig[i]), "")
         old_name = type(node.op).__name__
         node.op = _BINOP_SWAP[type(node.op)]()  # type: ignore[union-attr]
         yield Mutation(
@@ -115,17 +112,18 @@ def _binop_mutants(tree: ast.Module) -> Iterator[Mutation]:
         )
 
 
-def _compare_mutants(tree: ast.Module) -> Iterator[Mutation]:
+def _compare_mutants(tree: ast.Module, scope: dict[int, str]) -> Iterator[Mutation]:
     # A Compare node may chain several ops; mutate the first swappable op.
     def pred(n: ast.AST) -> bool:
         return isinstance(n, ast.Compare) and any(
             type(op) in _CMP_SWAP for op in n.ops
         )
 
-    for i in range(len(_nodes(tree, pred))):
+    orig = _nodes(tree, pred)
+    for i in range(len(orig)):
         new = copy.deepcopy(tree)
         node = _nodes(new, pred)[i]
-        fn = _enclosing_function(new, node)
+        fn = scope.get(id(orig[i]), "")
         for j, op in enumerate(node.ops):  # type: ignore[union-attr]
             if type(op) in _CMP_SWAP:
                 old_name = type(op).__name__
@@ -140,14 +138,15 @@ def _compare_mutants(tree: ast.Module) -> Iterator[Mutation]:
                 break
 
 
-def _boolop_mutants(tree: ast.Module) -> Iterator[Mutation]:
+def _boolop_mutants(tree: ast.Module, scope: dict[int, str]) -> Iterator[Mutation]:
     def pred(n: ast.AST) -> bool:
         return isinstance(n, ast.BoolOp) and type(n.op) in _BOOL_SWAP
 
-    for i in range(len(_nodes(tree, pred))):
+    orig = _nodes(tree, pred)
+    for i in range(len(orig)):
         new = copy.deepcopy(tree)
         node = _nodes(new, pred)[i]
-        fn = _enclosing_function(new, node)
+        fn = scope.get(id(orig[i]), "")
         old_name = type(node.op).__name__
         node.op = _BOOL_SWAP[type(node.op)]()  # type: ignore[union-attr]
         yield Mutation(
@@ -167,11 +166,12 @@ def _is_number(n: ast.AST) -> bool:
     )
 
 
-def _constant_mutants(tree: ast.Module) -> Iterator[Mutation]:
-    for i in range(len(_nodes(tree, _is_number))):
+def _constant_mutants(tree: ast.Module, scope: dict[int, str]) -> Iterator[Mutation]:
+    orig_nums = _nodes(tree, _is_number)
+    for i in range(len(orig_nums)):
         new = copy.deepcopy(tree)
         node = _nodes(new, _is_number)[i]
-        fn = _enclosing_function(new, node)
+        fn = scope.get(id(orig_nums[i]), "")
         old = node.value  # type: ignore[union-attr]
         node.value = old + 1  # type: ignore[union-attr]
         yield Mutation(
@@ -185,10 +185,11 @@ def _constant_mutants(tree: ast.Module) -> Iterator[Mutation]:
     def is_bool(n: ast.AST) -> bool:
         return isinstance(n, ast.Constant) and isinstance(n.value, bool)
 
-    for i in range(len(_nodes(tree, is_bool))):
+    orig_bools = _nodes(tree, is_bool)
+    for i in range(len(orig_bools)):
         new = copy.deepcopy(tree)
         node = _nodes(new, is_bool)[i]
-        fn = _enclosing_function(new, node)
+        fn = scope.get(id(orig_bools[i]), "")
         old = node.value  # type: ignore[union-attr]
         node.value = not old  # type: ignore[union-attr]
         yield Mutation(
@@ -200,12 +201,13 @@ def _constant_mutants(tree: ast.Module) -> Iterator[Mutation]:
         )
 
 
-def _benign_mutants(tree: ast.Module) -> Iterator[Mutation]:
+def _benign_mutants(tree: ast.Module, scope: dict[int, str]) -> Iterator[Mutation]:
     """Insert a no-op binding at the top of each function body.
 
     Behaviour-preserving, so these are expected to keep the tests green and
     supply the positive class. They still produce a non-trivial diff, so the
-    patch-feature vector is meaningful.
+    patch-feature vector is meaningful. ``scope`` is unused here — the enclosing
+    function is the mutated function itself — but kept for a uniform signature.
     """
 
     def pred(n: ast.AST) -> bool:
@@ -230,6 +232,9 @@ def generate_mutations(source: str) -> list[Mutation]:
     each other are de-duplicated (an operator swap can be a syntactic no-op)."""
     tree = ast.parse(source)
     baseline = _unparse(copy.deepcopy(tree))
+    # Compute the node -> enclosing-function map once for the whole tree; passed
+    # to every generator so we never re-walk per mutant (keeps it O(N), not N^2).
+    scope = _scope_map(tree)
 
     seen: set[str] = {baseline}
     out: list[Mutation] = []
@@ -240,7 +245,7 @@ def generate_mutations(source: str) -> list[Mutation]:
         _constant_mutants,
         _benign_mutants,
     ):
-        for mut in gen(tree):
+        for mut in gen(tree, scope):
             if mut.mutated_src in seen:
                 continue
             seen.add(mut.mutated_src)

@@ -56,3 +56,34 @@ def test_select_best_picks_highest_executable():
     b = arbiter.decide(_pred(branch_id="b", p_t=0.95))
     c = arbiter.decide(_pred(branch_id="c", p_c=0))
     assert arbiter.select_best([a, b, c]).branch_id == "b"
+
+
+def test_low_coverage_routes_to_incremental_not_execute():
+    # A confident, well-scored branch would EXECUTE...
+    assert arbiter.decide(_pred()).routing == Routing.EXECUTE
+    # ...but if its edited lines are under-tested (coverage_u > u_max), it must
+    # route to gather evidence instead — never silently EXECUTE on weak evidence.
+    pred = _pred()
+    decided = arbiter.decide(pred, coverage_u=SETTINGS.hp.u_max + 0.05)
+    assert decided.routing == Routing.INCREMENTAL_SANDBOX
+    assert pred.u == 0.0  # the model's epistemic u is left untouched (logged raw)
+
+
+def test_high_coverage_leaves_execute_unchanged():
+    # Fully-covered change (coverage_u = 0) doesn't alter the decision.
+    assert arbiter.decide(_pred(), coverage_u=0.0).routing == Routing.EXECUTE
+
+
+def test_conformal_gate_blocks_unguaranteed_execute():
+    # p_t below the conformal threshold: scored OK but no guarantee -> gather more
+    # evidence instead of EXECUTE.
+    pred = arbiter.decide(_pred(p_t=0.8), conformal_threshold=0.9)
+    assert pred.routing == Routing.INCREMENTAL_SANDBOX
+    # p_t at/above the threshold executes normally.
+    assert arbiter.decide(_pred(p_t=0.8), conformal_threshold=0.5).routing == Routing.EXECUTE
+
+
+def test_conformal_gate_applies_after_score_gate():
+    # A low-score branch still PRUNEs; the conformal gate doesn't override that.
+    pred = arbiter.decide(_pred(p_t=0.05, c_planner=0.1), conformal_threshold=0.0)
+    assert pred.routing == Routing.PRUNE

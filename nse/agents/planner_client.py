@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from nse.agents.base_client import LLMClient
@@ -19,4 +20,8 @@ class PlannerClient(LLMClient):
             PlannerBranch,
             temperature=SETTINGS.llm.planner_temperature,
         )
+        # Real models often echo the example UUID, colliding branch_ids (and the
+        # DB's INSERT OR REPLACE). Assign fresh ids — never trust the model's.
+        for b in branches:
+            b.branch_id = str(uuid.uuid4())
         return branches[: SETTINGS.hp.k]

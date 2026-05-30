@@ -8,9 +8,10 @@ the orchestrator/CI; this module just computes and fits.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -20,6 +21,13 @@ try:
     _SKLEARN = True
 except ImportError:  # pragma: no cover
     _SKLEARN = False
+
+try:
+    from scipy.stats import beta as _beta
+
+    _SCIPY = True
+except ImportError:  # pragma: no cover
+    _SCIPY = False
 
 
 def compute_ece(prob: Sequence[float], labels: Sequence[int], n_bins: int = 10) -> float:
@@ -103,6 +111,60 @@ def fit_isotonic_recalibrator(
     xs = np.linspace(0.0, 1.0, grid)
     ys = iso.predict(xs)
     return Recalibrator(xs.tolist(), [float(y) for y in ys])
+
+
+# ───────────────────── conformal EXECUTE gate (Phase 7.2) ─────────────────
+
+
+# A threshold above 1.0 is the "execute nothing" sentinel: no p_t can clear it,
+# so when the false-execute guarantee is unachievable the gate stays conservative.
+CONFORMAL_NEVER = 1.01
+
+
+def binomial_upper_bound(k: int, n: int, delta: float) -> float:
+    """Upper (1-delta) confidence bound on a failure probability given k failures
+    in n trials. Clopper-Pearson (exact, via scipy) when available, else the
+    distribution-free Hoeffding bound. Both are valid finite-sample bounds."""
+    if n == 0:
+        return 1.0
+    if k >= n:
+        return 1.0
+    if _SCIPY:
+        return float(_beta.ppf(1.0 - delta, k + 1, n - k))
+    return min(1.0, k / n + math.sqrt(math.log(1.0 / delta) / (2 * n)))
+
+
+def fit_conformal_threshold(
+    prob: Sequence[float],
+    labels: Sequence[int],
+    alpha: float,
+    delta: float,
+    min_samples: int = 20,
+    min_support: int = 5,
+) -> Optional[float]:
+    """Smallest p_t threshold τ such that EXECUTE-ing at ``p_t >= τ`` keeps the
+    false-execute rate ≤ ``alpha`` with confidence ``1 - delta``.
+
+    Distribution-free: validity rests on a binomial tail bound over the held-out
+    calibration set, no distributional assumptions. Returns the smallest valid τ
+    (max coverage); ``CONFORMAL_NEVER`` if no τ can be guaranteed; ``None`` when
+    there isn't enough calibration data to make a claim (gate stays disabled).
+    """
+    probs = list(prob)
+    labs = list(labels)
+    n_total = len(labs)
+    if n_total < min_samples or len(set(labs)) < 2:
+        return None
+
+    for tau in sorted(set(probs)):  # ascending -> first valid is the most permissive
+        executed = [(p, y) for p, y in zip(probs, labs) if p >= tau]
+        n = len(executed)
+        if n < min_support:
+            continue
+        failures = sum(1 for _, y in executed if y == 0)
+        if binomial_upper_bound(failures, n, delta) <= alpha:
+            return float(tau)
+    return CONFORMAL_NEVER
 
 
 def fit_temperature(logits: Sequence[float], labels: Sequence[int], lr: float = 0.01,

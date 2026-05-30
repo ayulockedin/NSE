@@ -15,9 +15,14 @@ PLANNER_SYSTEM = (
     "You are PLANNER. Given the structured JSON context, output exactly "
     f"k={SETTINGS.hp.k} distinct, realistic implementation strategies as a "
     "JSON array of PlannerBranch objects. Each object must have: branch_id "
-    "(uuid), strategy (1-2 sentences), edited_files (list), patch_preview "
-    "(unified diff) or full_file_rewrites ({path: text}), assumptions (list), "
-    "expected_complexity (0..1), planner_confidence (0..1). Aim for diversity "
+    "(uuid), strategy (1-2 sentences), edited_files (list), full_file_rewrites "
+    "({path: COMPLETE new file content}), assumptions (list), "
+    "expected_complexity (0..1), planner_confidence (0..1). "
+    "PREFER full_file_rewrites containing the entire updated file (more reliable "
+    "than diffs). The current contents of each file are in context.source — "
+    "reproduce them EXACTLY and change only what the task requires; never drop "
+    "existing functions or code. Only edit files named in the context. Preserve "
+    "all existing behavior so the current tests still pass. Aim for diversity "
     "across approaches. Strict JSON only — no prose."
 )
 

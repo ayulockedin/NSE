@@ -46,6 +46,33 @@ class CriticReport(BaseModel):
     identified_failures: list[str] = Field(default_factory=list)
     attack_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
+    @field_validator("identified_failures", mode="before")
+    @classmethod
+    def _coerce_failures(cls, v: object) -> list[str]:
+        """Real models often return failures as objects or a single string;
+        coerce to a list of short strings so a stylistic deviation doesn't fail
+        the whole critic call."""
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v]
+        if not isinstance(v, list):
+            return [str(v)]
+        out: list[str] = []
+        for item in v:
+            if isinstance(item, str):
+                out.append(item)
+            elif isinstance(item, dict):
+                out.append(
+                    str(item.get("description")
+                        or item.get("failure")
+                        or item.get("scenario")
+                        or item)
+                )
+            else:
+                out.append(str(item))
+        return out
+
 
 # ──────────────────────────── Internal records ────────────────────────────
 
@@ -56,6 +83,7 @@ class PruneReason(str, Enum):
     UNSAFE_PATCH = "unsafe_patch"
     MALFORMED = "malformed"
     BUDGET_EXCEEDED = "budget_exceeded"
+    ORACLE_CRASH = "oracle_crash"  # property oracle: patch crashes on inputs the original handled
 
 
 class Routing(str, Enum):

@@ -16,6 +16,7 @@ Every calibration run is recorded in the ``calibrations`` table for traceability
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -26,6 +27,7 @@ from nse.models.calibrate import (
     _SKLEARN,
     compute_brier,
     compute_ece,
+    fit_conformal_threshold,
     fit_isotonic_recalibrator,
 )
 from nse.models.latent_model import WEIGHTS_DIR
@@ -34,6 +36,7 @@ if TYPE_CHECKING:  # avoid importing the DB layer at runtime / in tests of pure 
     from nse.db.db_client import DBClient
 
 RECALIBRATOR_PATH = WEIGHTS_DIR / "recalibrator.json"
+CONFORMAL_PATH = WEIGHTS_DIR / "conformal.json"
 
 
 @dataclass
@@ -43,6 +46,16 @@ class CalibrationResult:
     brier: float
     action: str       # "recalibrated_isotonic" | "ok" | "skipped_*"
     recalibrated: bool
+    conformal_threshold: Optional[float] = None
+
+
+@dataclass
+class DriftReport:
+    drifted: bool
+    ece: float
+    brier: float
+    n: int
+    recommendation: str  # "full_retrain_recommended" | "ok" | "insufficient_data"
 
 
 # ───────────────────────────── calibration ─────────────────────────────
@@ -53,8 +66,10 @@ def run_calibration(
     ece_threshold: float | None = None,
     min_samples: int = 20,
     persist_path: Path | str = RECALIBRATOR_PATH,
+    conformal_path: Path | str = CONFORMAL_PATH,
 ) -> CalibrationResult:
-    """Score logged predictions and recalibrate when ECE exceeds threshold."""
+    """Score logged predictions; recalibrate when ECE exceeds threshold; refit the
+    conformal EXECUTE threshold on the *effective* (deployed) probabilities."""
     ece_threshold = (
         SETTINGS.hp.ece_threshold if ece_threshold is None else ece_threshold
     )
@@ -73,17 +88,63 @@ def run_calibration(
     brier = compute_brier(probs, labels)
 
     recalibrated = False
+    recal: Optional[Recalibrator] = None
     if n < min_samples or len(set(labels)) < 2:
         action = "skipped_insufficient_data"
     elif ece > ece_threshold and _SKLEARN:
-        fit_isotonic_recalibrator(probs, labels).save(persist_path)
+        recal = fit_isotonic_recalibrator(probs, labels)
+        recal.save(persist_path)
         action = "recalibrated_isotonic"
         recalibrated = True
     else:
         action = "ok"
 
+    # Fit the conformal gate on the probabilities as the arbiter will compare
+    # them at decision time: recalibrated if a recalibrator is active, else raw.
+    if recal is None:
+        recal = load_recalibrator(persist_path)
+    probs_eff = [recal(p) for p in probs] if recal is not None else probs
+    threshold = fit_conformal_threshold(
+        probs_eff,
+        labels,
+        SETTINGS.hp.false_execute_alpha,
+        SETTINGS.hp.conformal_delta,
+        min_samples=min_samples,
+    )
+    if threshold is not None:
+        _save_conformal(threshold, conformal_path, n)
+
     db.insert_calibration(ece, brier, action)
-    return CalibrationResult(n, ece, brier, action, recalibrated)
+    return CalibrationResult(n, ece, brier, action, recalibrated, threshold)
+
+
+def detect_drift(
+    db: "DBClient",
+    threshold: float | None = None,
+    min_samples: int = 20,
+) -> DriftReport:
+    """Flag model drift (Phase 8.3): raw-model ECE above ``drift_ece_threshold``
+    means recalibration (which only patches the output) can't keep up and the
+    underlying GNN should be retrained. Measured on the raw logged ``p_t``."""
+    threshold = (
+        SETTINGS.hp.drift_ece_threshold if threshold is None else threshold
+    )
+    probs: list[float] = []
+    labels: list[int] = []
+    for r in db.predictions_with_outcomes():
+        if r["p_t"] is not None and r["tests_passed"] is not None:
+            probs.append(float(r["p_t"]))
+            labels.append(int(r["tests_passed"]))
+    n = len(labels)
+    if n < min_samples:
+        return DriftReport(False, 0.0, 0.0, n, "insufficient_data")
+    ece = compute_ece(probs, labels)
+    brier = compute_brier(probs, labels)
+    drifted = ece > threshold
+    return DriftReport(
+        drifted, ece, brier, n,
+        "full_retrain_recommended" if drifted else "ok",
+    )
 
 
 def load_recalibrator(
@@ -95,6 +156,33 @@ def load_recalibrator(
         return None
     try:
         return Recalibrator.load(path)
+    except (ValueError, KeyError, OSError):
+        return None
+
+
+def _save_conformal(threshold: float, path: Path | str, n: int) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "threshold": threshold,
+            "alpha": SETTINGS.hp.false_execute_alpha,
+            "delta": SETTINGS.hp.conformal_delta,
+            "n": n,
+        }),
+        encoding="utf-8",
+    )
+
+
+def load_conformal_threshold(
+    path: Path | str = CONFORMAL_PATH,
+) -> Optional[float]:
+    """Load the persisted conformal EXECUTE threshold, or ``None`` if absent."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        return float(json.loads(path.read_text(encoding="utf-8"))["threshold"])
     except (ValueError, KeyError, OSError):
         return None
 

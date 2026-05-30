@@ -40,15 +40,19 @@ def normalize_uncertainty(u: float) -> float:
     return min(1.0, max(0.0, u_norm))
 
 
-def score(pred: BranchPrediction, p_t: float | None = None) -> float:
+def score(
+    pred: BranchPrediction, p_t: float | None = None, u: float | None = None
+) -> float:
     """Compute S(B). Assumes ``pred.p_t`` already aggregated.
 
-    ``p_t`` overrides the value used in the score (e.g. a recalibrated p_t)
-    without mutating ``pred.p_t``, which stays the raw logged value.
+    ``p_t`` / ``u`` override the values used in the score (e.g. a recalibrated p_t
+    or a coverage-inflated uncertainty) without mutating ``pred``, which keeps the
+    raw logged values.
     """
     hp = SETTINGS.hp
     p_t = pred.p_t if p_t is None else p_t
-    u_norm = normalize_uncertainty(pred.u)
+    u = pred.u if u is None else u
+    u_norm = normalize_uncertainty(u)
     base = pred.p_c * p_t * pred.c_planner
     penalty = (
         hp.lambda1 * pred.r_critic
@@ -61,13 +65,27 @@ def score(pred: BranchPrediction, p_t: float | None = None) -> float:
 def decide(
     pred: BranchPrediction,
     recalibrator: Optional[Callable[[float], float]] = None,
+    coverage_u: float = 0.0,
+    conformal_threshold: Optional[float] = None,
 ) -> BranchPrediction:
     """Populate ``score``, ``routing`` and ``prune_reason`` on a prediction.
 
-    Returns the same object (mutated) for convenient chaining. A ``recalibrator``
-    (from the calibration loop) maps the aggregated ``p_t`` to a calibrated value
-    used for scoring/routing only — ``pred.p_t`` keeps the raw value so the next
-    calibration round fits raw->outcome and stays idempotent.
+    Returns the same object (mutated) for convenient chaining.
+
+    ``recalibrator`` (calibration loop) maps the aggregated ``p_t`` to a
+    calibrated value used for scoring/routing only — ``pred.p_t`` keeps the raw
+    value so re-calibration stays idempotent.
+
+    ``coverage_u`` (Phase 7.1) is the uncertainty that the change's edited lines
+    are under-tested. It combines with the model's epistemic ``pred.u`` as
+    ``max(pred.u, coverage_u)`` for routing + scoring, so an under-tested change
+    is sent to gather evidence rather than trusted — extending the
+    "never prune on uncertainty" invariant. ``pred.u`` stays the model's value.
+
+    ``conformal_threshold`` (Phase 7.2) is the conformal EXECUTE gate: a branch
+    that clears the score gate but whose calibrated ``p_t`` is below the threshold
+    lacks the statistical guarantee to act on, so it routes to
+    ``INCREMENTAL_SANDBOX`` (gather more evidence) instead of EXECUTE.
     """
     hp = SETTINGS.hp
 
@@ -78,10 +96,11 @@ def decide(
         return pred
 
     p_t_eff = recalibrator(pred.p_t) if recalibrator is not None else pred.p_t
-    pred.score = score(pred, p_t_eff)
+    u_eff = max(pred.u, coverage_u)
+    pred.score = score(pred, p_t_eff, u_eff)
 
-    if pred.u > hp.u_max:
-        # High epistemic uncertainty -> gather evidence, do NOT prune.
+    if u_eff > hp.u_max:
+        # High epistemic OR coverage uncertainty -> gather evidence, do NOT prune.
         pred.routing = Routing.INCREMENTAL_SANDBOX
         pred.prune_reason = None
         return pred
@@ -89,6 +108,13 @@ def decide(
     if pred.score < hp.tau_prune:
         pred.routing = Routing.PRUNE
         pred.prune_reason = PruneReason.LOW_SCORE
+        return pred
+
+    if conformal_threshold is not None and p_t_eff < conformal_threshold:
+        # Scored OK, but below the conformal guarantee -> gather more evidence
+        # rather than EXECUTE on an unguaranteed prediction.
+        pred.routing = Routing.INCREMENTAL_SANDBOX
+        pred.prune_reason = None
         return pred
 
     pred.routing = Routing.EXECUTE

@@ -19,6 +19,7 @@ torch-geometric>=2.5
 pytest>=8.0
 ruff>=0.4
 mypy>=1.9
+coverage>=7.0          # coverage-as-uncertainty signal (Phase 7.1); optional — degrades to no-op if absent
 
 # ── inference host (NOTE: vLLM has no native Windows wheels) ──
 # Install on Linux/WSL only:

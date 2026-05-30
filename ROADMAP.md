@@ -201,17 +201,25 @@ LLM/sandbox calls" — a role that survives every model upgrade.
   images for trusted+larger numbers; then ground the shipped `latent.pt` on the
   combined real corpus (LOPO already justifies it).
 
-### Phase 12 — Mastery of Uncertainty & Governance
+### Phase 12 — Mastery of Uncertainty & Governance  🟢 12.1–12.3 DONE
 **Objective:** principled, auditable autonomy.
-- **12.1 Epistemic vs aleatoric** — split "model doesn't know" (gather evidence)
-  from "inherently noisy / flaky test" (escalate, don't re-run). *(M · M)*
-- **12.2 Competence-aware autonomy** — per-segment calibration → policy:
-  auto-merge where well-calibrated, human-review where not. *(M · L)*
-- **12.3 Conformal-backed safety invariants** — turn "never prune on uncertainty"
-  into a guaranteed property. *(M · M)*
-- **12.4 Optimal-stopping framing** — model the per-task flow (run another
-  sandbox vs. execute vs. abstain under budget) as principled sequential
-  decision-making. *(H · H, research)*
+- **12.1 Epistemic vs aleatoric** — ✅ ensemble predictive-variance decomposition
+  (epistemic = head variance `u`; aleatoric = mean per-head p(1-p)) on
+  Latent/BranchPrediction. `arbiter.decide(aleatoric_max=)` escalates a would-
+  EXECUTE **near-coin-flip** (high aleatoric + |p_t-0.5| ≤ `coin_flip_band`) to
+  HUMAN_REVIEW — more evidence can't fix irreducible noise. Composes with 10.2
+  (epistemic → evidence runs; aleatoric → human).
+- **12.2 Competence-aware autonomy** — ✅ `nse/orchestrator/autonomy.py`: per-
+  segment (by edited file) ECE + execute-precision from logged history →
+  AUTO_MERGE / ASSISTED / HUMAN_REVIEW. Autonomy is *earned*; unknown segments
+  default to HUMAN_REVIEW. Advisory (never changes what executes).
+- **12.3 Conformal-backed safety invariants** — ✅ `nse/orchestrator/invariants.py`:
+  I1 never-prune-on-uncertainty, I2 symbolic-fail-prunes, I3 conformal-execute,
+  asserted in the orchestrator + a 3000-iter randomized property sweep over
+  `decide()`.
+- **12.4 Optimal-stopping framing** — model run-another-sandbox vs execute vs
+  abstain as sequential decision-making. *(H · H, research — deferred; 10.2
+  acquisition is the greedy approximation.)*
 
 ### Phase 13 — Productization & Scale
 - Governance-substrate API: pluggable layer over any agent.

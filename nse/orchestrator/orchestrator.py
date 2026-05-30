@@ -38,6 +38,7 @@ from nse.orchestrator import arbiter
 from nse.orchestrator.audit import reexecute_pruned
 from nse.orchestrator.cost import CostLedger, CostModel, rank_by_acquisition
 from nse.orchestrator.executor import run_sandbox, to_outcome
+from nse.orchestrator.invariants import assert_safe
 from nse.orchestrator.patcher import (
     PatchApplyError,
     PatchSafetyError,
@@ -186,6 +187,7 @@ class Orchestrator:
             p_t_latent=latent.p_t_latent,
             p_t=arbiter.aggregate_p_t(latent.p_t_latent, SCREEN_OPTIMISTIC_SIM),
             u=latent.u,
+            u_aleatoric=latent.u_aleatoric,
             r_critic=0.0,
             r_long=latent.r_long,
             c_planner=branch.planner_confidence,
@@ -339,11 +341,14 @@ class Orchestrator:
                         recalibrator=self.recalibrator,
                         coverage_u=ctx.coverage_u if ctx else 0.0,
                         conformal_threshold=self.conformal_threshold,
+                        aleatoric_max=SETTINGS.hp.aleatoric_max,
                     )
                     # Phase 7.3 oracle: a branch sent to gather evidence gets a
                     # property check; a new crash is unambiguous breakage -> prune.
                     if pred.routing == Routing.INCREMENTAL_SANDBOX and ctx and ctx.edited_fns:
                         self._apply_oracle_evidence(pred, b, snapshot, ctx.edited_fns[0])
+                    # Phase 12.3: enforce the safety invariants on the final decision.
+                    assert_safe(pred, coverage_u=ctx.coverage_u if ctx else 0.0)
             tokens = sum(
                 getattr(a, "tokens_used", 0) for a in (self.simulator, self.critic)
             )
@@ -416,9 +421,13 @@ class Orchestrator:
                     report.cost_units = round(ledger.total, 4)
                     return self._finalize(report, start)
 
+            reviews = sum(
+                1 for (_, p, _) in screened if p.routing == Routing.HUMAN_REVIEW
+            )
             report.notes.append(
                 f"cascade: screened {len(branches)} -> judged {len(survivors)} "
                 f"(saved {saved} LLM); no EXECUTE, {len(incrementals)} uncertain, "
+                f"{reviews} escalated to human (aleatoric), "
                 f"{sandbox_runs} evidence run(s), none passed"
             )
             report.cost_units = round(ledger.total, 4)

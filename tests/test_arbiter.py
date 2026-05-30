@@ -87,3 +87,24 @@ def test_conformal_gate_applies_after_score_gate():
     # A low-score branch still PRUNEs; the conformal gate doesn't override that.
     pred = arbiter.decide(_pred(p_t=0.05, c_planner=0.1), conformal_threshold=0.0)
     assert pred.routing == Routing.PRUNE
+
+
+def test_aleatoric_coinflip_escalates_to_human_review():
+    # A would-EXECUTE near-coin-flip (p_t≈0.5) with high irreducible uncertainty:
+    # with the gate set it escalates to HUMAN_REVIEW; without it, it EXECUTEs.
+    assert arbiter.decide(_pred(p_t=0.5, u_aleatoric=0.24)).routing == Routing.EXECUTE
+    pred = arbiter.decide(_pred(p_t=0.5, u_aleatoric=0.24), aleatoric_max=0.18)
+    assert pred.routing == Routing.HUMAN_REVIEW
+    assert pred.prune_reason is None
+
+
+def test_confident_aggregate_executes_despite_high_aleatoric():
+    # High latent aleatoric but a confident aggregate (p_t=0.8, not a coin-flip)
+    # still executes -- the gate only catches genuine ~50/50 decisions.
+    pred = arbiter.decide(_pred(p_t=0.8, u_aleatoric=0.24), aleatoric_max=0.18)
+    assert pred.routing == Routing.EXECUTE
+
+
+def test_low_aleatoric_coinflip_still_executes_under_gate():
+    pred = arbiter.decide(_pred(p_t=0.5, u_aleatoric=0.05), aleatoric_max=0.18)
+    assert pred.routing == Routing.EXECUTE

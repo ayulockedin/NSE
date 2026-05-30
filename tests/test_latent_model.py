@@ -28,3 +28,10 @@ def test_uncertainty_grows_with_complexity():
     assert high.u >= low.u
     # harder change -> lower predicted pass probability
     assert high.p_t_latent <= low.p_t_latent
+
+
+def test_uncertainty_decomposition_matches_formula():
+    pred = LatentEnsemble().predict(_branch(0.3))
+    expected = sum(p * (1 - p) for p in pred.per_head_p_t) / len(pred.per_head_p_t)
+    assert abs(pred.u_aleatoric - expected) < 1e-9  # mean per-head Bernoulli variance
+    assert 0.0 <= pred.u_aleatoric <= 0.25          # bounded by the Bernoulli max

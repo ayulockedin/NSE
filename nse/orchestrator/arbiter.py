@@ -67,6 +67,7 @@ def decide(
     recalibrator: Optional[Callable[[float], float]] = None,
     coverage_u: float = 0.0,
     conformal_threshold: Optional[float] = None,
+    aleatoric_max: Optional[float] = None,
 ) -> BranchPrediction:
     """Populate ``score``, ``routing`` and ``prune_reason`` on a prediction.
 
@@ -86,6 +87,13 @@ def decide(
     that clears the score gate but whose calibrated ``p_t`` is below the threshold
     lacks the statistical guarantee to act on, so it routes to
     ``INCREMENTAL_SANDBOX`` (gather more evidence) instead of EXECUTE.
+
+    ``aleatoric_max`` (Phase 12.1) escalates a would-EXECUTE branch to
+    ``HUMAN_REVIEW`` when its *irreducible* uncertainty ``pred.u_aleatoric``
+    exceeds it **and** the aggregate decision is itself a near-coin-flip
+    (``|p_t - 0.5| <= coin_flip_band``): epistemic is already low here, so more
+    evidence can't help and a human should decide. A confident aggregate is
+    unaffected even if the latent model alone was uncertain.
     """
     hp = SETTINGS.hp
 
@@ -114,6 +122,19 @@ def decide(
         # Scored OK, but below the conformal guarantee -> gather more evidence
         # rather than EXECUTE on an unguaranteed prediction.
         pred.routing = Routing.INCREMENTAL_SANDBOX
+        pred.prune_reason = None
+        return pred
+
+    if (
+        aleatoric_max is not None
+        and pred.u_aleatoric > aleatoric_max
+        and abs(p_t_eff - 0.5) <= hp.coin_flip_band
+    ):
+        # Irreducible (aleatoric) near-coin-flip: epistemic is already low here, so
+        # more evidence won't help, and the *aggregate* call is itself ~50/50 -> a
+        # human decides rather than auto-executing. A confident aggregate (e.g. a
+        # confident LLM resolving an uncertain latent) is unaffected.
+        pred.routing = Routing.HUMAN_REVIEW
         pred.prune_reason = None
         return pred
 

@@ -30,8 +30,16 @@ class Hyperparams:
     lambda2: float = 0.5             # long-term architecture risk penalty
     lambda3: float = 0.75            # uncertainty penalty (blueprint 2 value)
     tau_prune: float = 0.4           # score threshold below which we prune
-    u_max: float = 0.15              # uncertainty above which we gather evidence
+    u_max: float = 0.15              # epistemic uncertainty above which we gather evidence
     max_variance: float = 0.25       # theoretical max variance of a [0,1] var
+    # Aleatoric (irreducible) uncertainty above which a would-EXECUTE branch is
+    # escalated to HUMAN_REVIEW instead — a sandbox re-run can't stabilize a
+    # near-coin-flip / flaky outcome (Phase 12.1). Max mean p(1-p) is 0.25.
+    aleatoric_max: float = 0.18
+    # Escalation also requires the *aggregate* decision to be a near-coin-flip:
+    # |p_t - 0.5| within this band. A confident aggregate (e.g. a confident LLM
+    # resolving an uncertain latent) still executes despite a high latent aleatoric.
+    coin_flip_band: float = 0.1
     # Coverage-as-uncertainty (Phase 7.1): uncertainty assigned to a change whose
     # edited lines are 0% covered by the existing tests. Chosen > u_max so a fully
     # uncovered change routes to evidence-gathering instead of EXECUTE.
